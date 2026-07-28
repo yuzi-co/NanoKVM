@@ -80,8 +80,8 @@ func run() {
 		httpsPortStr := strconv.Itoa(conf.Port.Https)
 
 		go func() {
-			err := r.RunTLS(utils.ListenAddr(conf.Host, httpsPortStr), conf.Cert.Crt, conf.Cert.Key)
-			if err != nil {
+			server := utils.NewServer(utils.ListenAddr(conf.Host, httpsPortStr), r)
+			if err := server.ListenAndServeTLS(conf.Cert.Crt, conf.Cert.Key); err != nil {
 				panic("start https server failed")
 			}
 		}()
@@ -110,13 +110,13 @@ func run() {
 	} else {
 		if needsLoopbackHTTP {
 			go func() {
-				if err := r.Run(loopbackHTTPAddr); err != nil {
+				if err := utils.NewServer(loopbackHTTPAddr, r).ListenAndServe(); err != nil {
 					panic("start loopback http server failed")
 				}
 			}()
 		}
 
-		if err := r.Run(httpAddr); err != nil {
+		if err := utils.NewServer(httpAddr, r).ListenAndServe(); err != nil {
 			panic("start http server failed")
 		}
 	}

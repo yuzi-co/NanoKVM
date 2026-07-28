@@ -1,21 +1,23 @@
 package direct
 
 import (
-	"net/http"
 	"time"
+
+	"NanoKVM-Server/middleware"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 )
 
+// The client sends nothing on this socket, so anything sizeable is abuse.
+const maxReadSize = 1024
+
 var (
 	streamer = newStreamer()
 	upgrader = websocket.Upgrader{
 		WriteBufferSize: 256 * 1024,
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+		CheckOrigin:     middleware.SameOrigin,
 	}
 )
 
@@ -32,6 +34,8 @@ func Connect(c *gin.Context) {
 	log.Debugf("h264 websocket connected: %s", ws.RemoteAddr())
 
 	_ = ws.SetReadDeadline(time.Time{})
+	// The client never sends anything on this socket.
+	ws.SetReadLimit(maxReadSize)
 
 	streamer.addClient(ws)
 	defer streamer.removeClient(ws)

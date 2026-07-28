@@ -2,10 +2,11 @@ package vm
 
 import (
 	"encoding/json"
-	"net/http"
 	"os"
 	"os/exec"
 	"time"
+
+	"NanoKVM-Server/middleware"
 
 	"github.com/creack/pty"
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,9 @@ import (
 const (
 	messageWait    = 10 * time.Second
 	maxMessageSize = 1024
+	// maxReadSize bounds one client frame; large enough for a paste, small
+	// enough that a hostile client cannot exhaust memory.
+	maxReadSize = 64 * 1024
 )
 
 type WinSize struct {
@@ -26,9 +30,7 @@ type WinSize struct {
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  maxMessageSize,
 	WriteBufferSize: maxMessageSize,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	CheckOrigin:     middleware.SameOrigin,
 }
 
 func (s *Service) Terminal(c *gin.Context) {
@@ -83,6 +85,7 @@ func wsWrite(ws *websocket.Conn, ptmx *os.File) {
 func wsRead(ws *websocket.Conn, ptmx *os.File) {
 	var zeroTime time.Time
 	_ = ws.SetReadDeadline(zeroTime)
+	ws.SetReadLimit(maxReadSize)
 
 	for {
 		msgType, p, err := ws.ReadMessage()

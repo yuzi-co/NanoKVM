@@ -12,6 +12,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// maxMessageSize bounds a single client frame. HID events are a handful of
+// bytes, so this is generous.
+const maxMessageSize = 4 * 1024
+
 const (
 	Heartbeat = iota
 	KeyboardEvent
@@ -44,6 +48,7 @@ func (c *Client) Start() {
 func (c *Client) Read() error {
 	var zeroTime time.Time
 	_ = c.ws.SetReadDeadline(zeroTime)
+	c.ws.SetReadLimit(maxMessageSize)
 
 	for {
 		messageType, data, err := c.ws.ReadMessage()

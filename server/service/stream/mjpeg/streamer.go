@@ -135,14 +135,16 @@ func (s *Streamer) run() {
 	}
 }
 
+// setLatestFrame caches the frame for the screenshot API. The capture loop
+// hands over a freshly allocated slice per frame and nobody mutates it, so the
+// cache shares it rather than copying a whole JPEG on every tick. getLatestFrame
+// still copies, so callers cannot reach back into it.
 func (s *Streamer) setLatestFrame(data []byte, width uint16, height uint16) {
-	frameCopy := append([]byte(nil), data...)
-
 	s.frameMutex.Lock()
 	defer s.frameMutex.Unlock()
 
 	s.latestFrame = LatestFrame{
-		Data:       frameCopy,
+		Data:       data,
 		Width:      width,
 		Height:     height,
 		CapturedAt: time.Now(),

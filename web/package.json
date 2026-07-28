@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "mocked": "vite --mode mocked",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node scripts/precompress.mjs",
+    "precompress": "node scripts/precompress.mjs",
     "lint": "eslint . --report-unused-disable-directives",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,json,css,scss,md}\"",
     "preview": "vite preview"

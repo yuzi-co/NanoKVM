@@ -47,6 +47,14 @@ func staticHandler(webPath string) gin.HandlerFunc {
 			return
 		}
 
+		// Shared caches must not hand a compressed body to a client that
+		// cannot read one, whichever branch answers below.
+		c.Header("Vary", "Accept-Encoding")
+
+		if servePrecompressed(c, webPath) {
+			return
+		}
+
 		serve(c)
 	}
 }

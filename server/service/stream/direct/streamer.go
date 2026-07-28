@@ -1,7 +1,6 @@
 package direct
 
 import (
-	"encoding/binary"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,24 +121,12 @@ func (s *Streamer) run() {
 	}
 }
 
-// send hands the frame to every client's writer goroutine. The message is
-// built once and shared, so it must not be modified afterwards.
+// send hands the frame to every client's writer goroutine. The payload is
+// shared, so it must not be modified afterwards.
 func (s *Streamer) send(clients []*client, isKeyFrame bool, timestamp int64, data []byte) {
-	message := make([]byte, 0, 1+8+len(data))
-
-	flag := byte(0)
-	if isKeyFrame {
-		flag = 1
-	}
-	message = append(message, flag)
-
-	var tsBytes [8]byte
-	binary.LittleEndian.PutUint64(tsBytes[:], uint64(timestamp))
-	message = append(message, tsBytes[:]...)
-
-	message = append(message, data...)
+	frame := newH264Frame(isKeyFrame, timestamp, data)
 
 	for _, c := range clients {
-		c.enqueue(message, isKeyFrame)
+		c.enqueue(frame, isKeyFrame)
 	}
 }

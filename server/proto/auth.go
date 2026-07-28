@@ -23,3 +23,27 @@ type ChangePasswordReq struct {
 type IsPasswordUpdatedRsp struct {
 	IsUpdated bool `json:"isUpdated"`
 }
+
+type CreateAPIKeyReq struct {
+	Name string `json:"name"`
+}
+
+// APIKey describes an issued key. The secret is deliberately absent: it is
+// only ever returned by CreateAPIKeyRsp, at the moment it is issued.
+type APIKey struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+type CreateAPIKeyRsp struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt int64  `json:"createdAt"`
+	// Key is shown once and cannot be recovered afterwards.
+	Key string `json:"key"`
+}
+
+type GetAPIKeysRsp struct {
+	Keys []APIKey `json:"keys"`
+}

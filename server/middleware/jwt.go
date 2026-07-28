@@ -23,6 +23,26 @@ func CheckToken() gin.HandlerFunc {
 			return
 		}
 
+		if allowByToken(c) || allowByAPIKey(c.Request) {
+			c.Next()
+			return
+		}
+
+		abortUnauthorized(c)
+	}
+}
+
+// CheckSession guards routes that an api key must not reach: the ones that
+// issue and revoke the keys themselves. A stolen key already has the run of
+// the API, but this stops it minting further keys that would outlive the
+// password change made to shut it out.
+func CheckSession() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !allowByOrigin(c.Request) {
+			abortForbiddenOrigin(c)
+			return
+		}
+
 		if allowByToken(c) {
 			c.Next()
 			return
@@ -50,7 +70,7 @@ func CheckTokenOrLoopbackInternalToken() gin.HandlerFunc {
 			return
 		}
 
-		if allowByToken(c) || allowByLoopbackInternalToken(c.Request) {
+		if allowByToken(c) || allowByAPIKey(c.Request) || allowByLoopbackInternalToken(c.Request) {
 			c.Next()
 			return
 		}

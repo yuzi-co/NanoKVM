@@ -18,4 +18,12 @@ func authRouter(r *gin.Engine) {
 	api.GET("/auth/account", service.GetAccount)         // get account
 	api.POST("/auth/password", service.ChangePassword)   // change password
 	api.POST("/auth/logout", service.Logout)             // logout
+
+	// Issuing and revoking keys is session work: an api key must not be able
+	// to mint further keys.
+	keys := r.Group("/api").Use(middleware.CheckSession())
+
+	keys.GET("/auth/api-keys", service.GetAPIKeys)          // list api keys
+	keys.POST("/auth/api-keys", service.CreateAPIKey)       // create an api key
+	keys.DELETE("/auth/api-keys/:id", service.DeleteAPIKey) // revoke an api key
 }

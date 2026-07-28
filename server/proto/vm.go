@@ -98,8 +98,14 @@ type GetOLEDRsp struct {
 }
 
 type GetGetHdmiStateRsp struct {
-	Enabled     bool `json:"enabled"`
-	IdleTimeout int  `json:"idleTimeout"`
+	// Enabled reports whether capture is switched on in software.
+	Enabled bool `json:"enabled"`
+
+	// Signal reports whether the port is actually carrying a picture, which
+	// is how a caller tells a sleeping machine from an awake one.
+	Signal bool `json:"signal"`
+
+	IdleTimeout int `json:"idleTimeout"`
 }
 
 type SetHdmiIdleTimeoutReq struct {

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+
+	"NanoKVM-Server/utils"
 )
 
 func (s *Service) installRuntime() (string, *PicoclawError) {
@@ -158,9 +160,7 @@ func downloadPicoclawArchive(ctx context.Context, destination string, onProgress
 		return fmt.Errorf("failed to create download request: %w", err)
 	}
 
-	client := &http.Client{
-		Timeout: picoclawDownloadTimeout,
-	}
+	client := utils.OutboundClient(picoclawDownloadTimeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download picoclaw: %w", err)
@@ -189,9 +189,7 @@ func downloadPicoclawChecksum(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to create checksum request: %w", err)
 	}
 
-	client := &http.Client{
-		Timeout: picoclawDownloadTimeout,
-	}
+	client := utils.OutboundClient(picoclawDownloadTimeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to download picoclaw checksum: %w", err)

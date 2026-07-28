@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"NanoKVM-Server/utils"
 )
 
 // reservedFreeBytes is kept back so a download cannot fill the card the device
@@ -26,7 +28,7 @@ var errNotEnoughSpace = errors.New("not enough free space for this image")
 // answers, which is the case that would otherwise hang forever.
 var imageClient = &http.Client{
 	Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 utils.ProxyFromConfig,
 		TLSHandshakeTimeout:   30 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 		IdleConnTimeout:       90 * time.Second,

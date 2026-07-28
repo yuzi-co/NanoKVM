@@ -45,7 +45,7 @@ func Download(req *http.Request, target string, opts DownloadOptions) error {
 		return err
 	}
 
-	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	resp, err := OutboundClient(timeout).Do(req)
 	if err != nil {
 		log.Errorf("request error: %s", err)
 		return err

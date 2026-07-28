@@ -115,7 +115,7 @@ func download(target string) error {
 }
 
 func fetchPackage(url string, target string) error {
-	resp, err := (&http.Client{Timeout: downloadTimeout}).Get(url)
+	resp, err := utils.OutboundClient(downloadTimeout).Get(url)
 	if err != nil {
 		log.Errorf("failed to download Tailscale: %s", err)
 		return err
@@ -162,7 +162,7 @@ func fetchChecksum(url string) ([]byte, error) {
 		return nil, err
 	}
 
-	resp, err := (&http.Client{Timeout: checksumTimeout}).Get(url)
+	resp, err := utils.OutboundClient(checksumTimeout).Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +237,7 @@ func checkDownloadHost(rawURL string) error {
 // is enough: a GET would pull the whole archive only to discard it and fetch
 // it again.
 func getDownloadURL() (string, error) {
-	resp, err := (&http.Client{Timeout: checksumTimeout}).Head(OriginalURL)
+	resp, err := utils.OutboundClient(checksumTimeout).Head(OriginalURL)
 	if err != nil {
 		return "", err
 	}

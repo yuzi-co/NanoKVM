@@ -19,6 +19,32 @@ const (
 	indexFileName = "index.html"
 )
 
+const (
+	// assetsPrefix is where the build puts content-hashed files.
+	assetsPrefix = "/assets/"
+
+	// immutableCache is only sound for a content-hashed name: changing the
+	// file changes the name, so a cached copy can never be the wrong one.
+	immutableCache = "public, max-age=31536000, immutable"
+
+	// noCache covers everything else, index.html above all. Revalidation is
+	// not enough here: the packaged files carry no meaningful modification
+	// time, so a conditional request can be answered "unchanged" after an
+	// update and leave a stale UI in place.
+	noCache = "no-store"
+)
+
+// cacheControlFor picks a caching policy from the request path alone, so it
+// applies whichever branch below ends up answering.
+func cacheControlFor(urlPath string) string {
+	clean := path.Clean("/" + strings.TrimPrefix(urlPath, "/"))
+	if strings.HasPrefix(clean, assetsPrefix) {
+		return immutableCache
+	}
+
+	return noCache
+}
+
 // servePrecompressed answers with the .gz sibling the build produced, when the
 // client can decompress it. Compressing on the fly would cost more CPU than the
 // board has to spare, and the assets never change between requests. Reports

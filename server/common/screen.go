@@ -2,13 +2,22 @@ package common
 
 import "sync"
 
-type Screen struct {
+// ScreenValues is a consistent copy of the capture parameters.
+type ScreenValues struct {
 	Width   uint16
 	Height  uint16
 	FPS     int
 	Quality uint16
 	BitRate uint16
 	GOP     uint8
+}
+
+// Screen holds the capture parameters. HTTP handlers write them while the
+// streamer goroutines read them on every frame, so access goes through the
+// mutex and readers take a snapshot instead of reading field by field.
+type Screen struct {
+	mutex  sync.RWMutex
+	values ScreenValues
 }
 
 var (
@@ -42,54 +51,74 @@ var BitRateMap = map[uint16]bool{
 func GetScreen() *Screen {
 	screenOnce.Do(func() {
 		screen = &Screen{
-			Width:   0,
-			Height:  0,
-			Quality: 80,
-			FPS:     30,
-			BitRate: 3000,
-			GOP:     30,
+			values: ScreenValues{
+				Width:   0,
+				Height:  0,
+				Quality: 80,
+				FPS:     30,
+				BitRate: 3000,
+				GOP:     30,
+			},
 		}
 	})
 
 	return screen
 }
 
+// Snapshot returns the current parameters as a single consistent copy.
+func (s *Screen) Snapshot() ScreenValues {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	return s.values
+}
+
 func SetScreen(key string, value int) {
+	s := GetScreen()
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	switch key {
 	case "resolution":
 		height := uint16(value)
 		if width, ok := ResolutionMap[height]; ok {
-			screen.Width = width
-			screen.Height = height
+			s.values.Width = width
+			s.values.Height = height
 		}
 
 	case "quality":
 		if value > 100 {
-			screen.BitRate = uint16(value)
+			s.values.BitRate = uint16(value)
 		} else {
-			screen.Quality = uint16(value)
+			s.values.Quality = uint16(value)
 		}
 
 	case "fps":
-		screen.FPS = validateFPS(value)
+		s.values.FPS = validateFPS(value)
 
 	case "gop":
-		screen.GOP = uint8(value)
+		s.values.GOP = uint8(value)
 	}
 }
 
 func CheckScreen() {
-	if _, ok := ResolutionMap[screen.Height]; !ok {
-		screen.Width = 1920
-		screen.Height = 1080
+	s := GetScreen()
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if _, ok := ResolutionMap[s.values.Height]; !ok {
+		s.values.Width = 1920
+		s.values.Height = 1080
 	}
 
-	if _, ok := QualityMap[screen.Quality]; !ok {
-		screen.Quality = 80
+	if _, ok := QualityMap[s.values.Quality]; !ok {
+		s.values.Quality = 80
 	}
 
-	if _, ok := BitRateMap[screen.BitRate]; !ok {
-		screen.BitRate = 3000
+	if _, ok := BitRateMap[s.values.BitRate]; !ok {
+		s.values.BitRate = 3000
 	}
 }
 

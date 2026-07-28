@@ -76,7 +76,8 @@ func (m *WebRTCManager) sendVideoStream() {
 
 	screen := common.GetScreen()
 	common.CheckScreen()
-	fps := screen.FPS
+	values := screen.Snapshot()
+	fps := values.FPS
 	duration := time.Second / time.Duration(fps)
 
 	vision := common.GetKvmVision()
@@ -91,7 +92,9 @@ func (m *WebRTCManager) sendVideoStream() {
 			return
 		}
 
-		data, result := vision.ReadH264(screen.Width, screen.Height, screen.BitRate)
+		values = screen.Snapshot()
+
+		data, result := vision.ReadH264(values.Width, values.Height, values.BitRate)
 		stream.UpdateCaptureStatus(stream.CaptureModeH264, result)
 		if result < 0 || len(data) == 0 {
 			continue
@@ -110,8 +113,8 @@ func (m *WebRTCManager) sendVideoStream() {
 			}
 		}
 
-		if screen.FPS != fps && screen.FPS != 0 {
-			fps = screen.FPS
+		if values.FPS != fps && values.FPS != 0 {
+			fps = values.FPS
 			duration = time.Second / time.Duration(fps)
 			ticker.Reset(duration)
 		}

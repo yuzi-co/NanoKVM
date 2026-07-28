@@ -73,8 +73,8 @@ func (s *Service) captureScreenshot(query ScreenshotQuery) ([]byte, ScreenshotMe
 		}
 	}
 
-	screen := common.GetScreen()
 	common.CheckScreen()
+	values := common.GetScreen().Snapshot()
 
 	for attempt := 0; attempt < screenshotRetryCount; attempt++ {
 		data, result := s.vision.ReadMjpeg(width, height, quality)
@@ -89,8 +89,8 @@ func (s *Service) captureScreenshot(query ScreenshotQuery) ([]byte, ScreenshotMe
 			return nil, ScreenshotMeta{}, newPicoclawError(CodeScreenshotFailed, "failed to capture screenshot")
 		default:
 			return data, ScreenshotMeta{
-				SourceWidth:   screen.Width,
-				SourceHeight:  screen.Height,
+				SourceWidth:   values.Width,
+				SourceHeight:  values.Height,
 				CaptureWidth:  width,
 				CaptureHeight: height,
 				Format:        "jpeg",
@@ -106,10 +106,10 @@ func canUseCachedFrame(query ScreenshotQuery) bool {
 }
 
 func resolveScreenshotRequest(query ScreenshotQuery) (uint16, uint16, uint16) {
-	screen := common.GetScreen()
-	width := screen.Width
-	height := screen.Height
-	quality := screen.Quality
+	values := common.GetScreen().Snapshot()
+	width := values.Width
+	height := values.Height
+	quality := values.Quality
 
 	if query.Format == "base64" {
 		width, height = fitWithinBounds(width, height, defaultPicoclawScreenshotWidth, defaultPicoclawScreenshotHeight)

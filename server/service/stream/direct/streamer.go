@@ -13,6 +13,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// writeTimeout caps how long a single client may stall the fan-out loop.
+const writeTimeout = 5 * time.Second
+
 type Streamer struct {
 	mutex          sync.Mutex
 	clients        map[*websocket.Conn]bool
@@ -74,7 +77,8 @@ func (s *Streamer) run() {
 
 	screen := common.GetScreen()
 	common.CheckScreen()
-	fps := screen.FPS
+	values := screen.Snapshot()
+	fps := values.FPS
 
 	ticker := time.NewTicker(time.Second / time.Duration(fps))
 	defer ticker.Stop()
@@ -89,7 +93,9 @@ func (s *Streamer) run() {
 			return
 		}
 
-		data, result := vision.ReadH264(screen.Width, screen.Height, screen.BitRate)
+		values = screen.Snapshot()
+
+		data, result := vision.ReadH264(values.Width, values.Height, values.BitRate)
 		stream.UpdateCaptureStatus(stream.CaptureModeDirect, result)
 		if result < 0 || len(data) == 0 {
 			continue
@@ -106,8 +112,8 @@ func (s *Streamer) run() {
 			continue
 		}
 
-		if screen.FPS != fps && screen.FPS != 0 {
-			fps = screen.FPS
+		if values.FPS != fps && values.FPS != 0 {
+			fps = values.FPS
 			ticker.Reset(time.Second / time.Duration(fps))
 		}
 
@@ -140,6 +146,10 @@ func (s *Streamer) send(clients []*websocket.Conn, isKeyFrame byte, timestamp in
 	}
 
 	for _, client := range clients {
+		// Without a deadline a client that stops reading blocks this loop,
+		// and with it every other viewer's stream.
+		_ = client.SetWriteDeadline(time.Now().Add(writeTimeout))
+
 		if err := client.WriteMessage(websocket.BinaryMessage, buf.Bytes()); err != nil {
 			log.Errorf("failed to write message to client %s: %s.", client.RemoteAddr(), err)
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -213,6 +214,22 @@ func isRetryableWriteError(err error) bool {
 	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
 }
 
+// hidFileWasDeleted reports whether the device node behind an open handle has
+// been removed.
+//
+// Rebuilding the USB gadget - mounting an image, switching HID mode - deletes
+// /dev/hidg*. A handle opened before that keeps accepting writes that reach
+// nothing, so keyboard and mouse stop working with no error to say why. The
+// kernel marks the link in /proc/self/fd for exactly this case.
+func hidFileWasDeleted(file *os.File) bool {
+	target, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", file.Fd()))
+	if err != nil {
+		return false
+	}
+
+	return strings.HasSuffix(target, " (deleted)")
+}
+
 func (h *Hid) Open() {
 	h.kbMutex.Lock()
 	defer h.kbMutex.Unlock()
@@ -254,6 +271,12 @@ func (h *Hid) writeHIDReport(device hidDevice, data []byte) bool {
 func (h *Hid) writeHID(device hidDevice, data []byte) error {
 	device.mu.Lock()
 	defer device.mu.Unlock()
+
+	// Drop a handle whose device node is gone before writing into it.
+	if file := device.get(); file != nil && hidFileWasDeleted(file) {
+		log.Debugf("%s was rebuilt underneath us, reopening", device.path)
+		h.closeDeviceNoLock(device)
+	}
 
 	if err := h.openDeviceNoLock(device); err != nil {
 		return err

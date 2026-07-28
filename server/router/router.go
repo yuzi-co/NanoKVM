@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/contrib/static"
 	"github.com/gin-gonic/gin"
@@ -25,7 +26,26 @@ func web(r *gin.Engine) {
 	execDir := filepath.Dir(execPath)
 	webPath := fmt.Sprintf("%s/web", execDir)
 
-	r.Use(static.Serve("/", static.LocalFile(webPath, true)))
+	r.Use(staticHandler(webPath))
+}
+
+// apiPrefix covers every route this server registers.
+const apiPrefix = "/api/"
+
+// staticHandler serves the built web UI. The static middleware runs before
+// routing and stats the filesystem for every request, so an API call or a
+// websocket upgrade would pay a syscall against the SD card, and a file that
+// happened to sit at the same path would shadow the real handler.
+func staticHandler(webPath string) gin.HandlerFunc {
+	serve := static.Serve("/", static.LocalFile(webPath, true))
+
+	return func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, apiPrefix) {
+			return
+		}
+
+		serve(c)
+	}
 }
 
 func server(r *gin.Engine) {

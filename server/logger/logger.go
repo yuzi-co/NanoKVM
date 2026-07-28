@@ -23,6 +23,13 @@ func openLogFile(filename string) (*os.File, error) {
 	return file, nil
 }
 
+// shouldReportCaller reports whether entries should carry file and line.
+// Resolving the caller walks the stack for every entry that passes the level
+// filter, which is only worth paying for while debugging.
+func shouldReportCaller(level logrus.Level) bool {
+	return level >= logrus.DebugLevel
+}
+
 func Init() {
 	conf := config.GetInstance()
 
@@ -44,7 +51,7 @@ func Init() {
 		}
 	}
 
-	logrus.SetReportCaller(true)
+	logrus.SetReportCaller(shouldReportCaller(level))
 	logrus.SetFormatter(&formatter{})
 
 	logrus.Info("logger set success")

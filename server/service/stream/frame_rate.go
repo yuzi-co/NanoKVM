@@ -1,8 +1,8 @@
 package stream
 
 import (
-	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,9 +15,37 @@ var (
 	counterOnce sync.Once
 )
 
+const fpsFile = "/kvmapp/kvm/now_fps"
+
 type FrameRateCounter struct {
 	frameCount atomic.Int32
 	fps        atomic.Int32
+
+	// published is the last value successfully written to disk. Only the
+	// publishing goroutine touches these two.
+	published    int32
+	hasPublished bool
+}
+
+// publishFPS writes fps to path, but only when it differs from the last value
+// that made it to disk. The counter ticks forever, so rewriting an unchanged
+// value just burns write cycles on the card the device boots from. Reports
+// whether anything was written.
+func (f *FrameRateCounter) publishFPS(path string, fps int32) bool {
+	if f.hasPublished && f.published == fps {
+		return false
+	}
+
+	data := strconv.FormatInt(int64(fps), 10)
+	if err := os.WriteFile(path, []byte(data), 0o666); err != nil {
+		log.Errorf("failed to write fps: %s", err)
+		return false
+	}
+
+	f.published = fps
+	f.hasPublished = true
+
+	return true
 }
 
 func GetFrameRateCounter() *FrameRateCounter {
@@ -32,11 +60,7 @@ func GetFrameRateCounter() *FrameRateCounter {
 				currentCount := counter.frameCount.Swap(0)
 				counter.fps.Store(currentCount / 3)
 
-				data := fmt.Sprintf("%d", counter.fps.Load())
-				err := os.WriteFile("/kvmapp/kvm/now_fps", []byte(data), 0o666)
-				if err != nil {
-					log.Errorf("failed to write fps: %s", err)
-				}
+				counter.publishFPS(fpsFile, counter.fps.Load())
 			}
 		}()
 	})

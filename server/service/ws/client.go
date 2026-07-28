@@ -60,7 +60,7 @@ func (c *Client) Read() error {
 			continue
 		}
 
-		log.Debugf("received message %d: %v", messageType, data)
+		traceMessage(messageType, data)
 
 		switch data[0] {
 		case Heartbeat:
@@ -132,6 +132,21 @@ func writeQueue(queue chan []byte, data []byte) {
 	jiggler.GetJiggler().Update()
 }
 
+// traceMessage logs an inbound event only when someone is listening. This runs
+// once per keystroke and per mouse move, and the variadic call allocates even
+// when the level is off.
+func traceMessage(messageType int, data []byte) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+
+	log.Debugf("received message %d: %v", messageType, data)
+}
+
+// sendQueue hands an event to a HID writer without ever blocking. A host that
+// has stopped accepting HID reports backs the queue up, and blocking here would
+// stall the websocket read loop, so heartbeats would stop being read and the
+// session would look dead. Reports whether the queue is still usable.
 func sendQueue(queue chan []byte, data []byte) (ok bool) {
 	if queue == nil {
 		return false
@@ -143,6 +158,23 @@ func sendQueue(queue chan []byte, data []byte) (ok bool) {
 		}
 	}()
 
-	queue <- data
+	// Only the read loop produces here, so evicting once is always enough to
+	// make room. The bound is a guard, not an expectation.
+	for range cap(queue) + 1 {
+		select {
+		case queue <- data:
+			return true
+		default:
+		}
+
+		// Drop the stalest report. HID reports carry absolute state rather
+		// than deltas, so the newest one describes the truth on its own and
+		// the backlog is worth losing.
+		select {
+		case <-queue:
+		default:
+		}
+	}
+
 	return true
 }

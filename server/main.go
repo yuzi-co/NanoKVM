@@ -34,6 +34,10 @@ func initialize() {
 
 	logger.Init()
 
+	// restore the memory limit the user configured, which is otherwise only
+	// applied to the process that set it and lost on the next boot
+	utils.InitGoMemLimit()
+
 	// init screen parameters
 	_ = common.GetScreen()
 

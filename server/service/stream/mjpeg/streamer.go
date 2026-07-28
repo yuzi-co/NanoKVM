@@ -5,6 +5,7 @@ import (
 	"NanoKVM-Server/service/stream"
 	"NanoKVM-Server/service/vm"
 	"fmt"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+// writeTimeout caps how long a single client may stall the fan-out loop.
+const writeTimeout = 5 * time.Second
 
 var crlf = []byte("\r\n")
 
@@ -87,7 +91,8 @@ func (s *Streamer) run() {
 
 	screen := common.GetScreen()
 	common.CheckScreen()
-	fps := screen.FPS
+	values := screen.Snapshot()
+	fps := values.FPS
 
 	vision := common.GetKvmVision()
 
@@ -101,14 +106,16 @@ func (s *Streamer) run() {
 			return
 		}
 
-		data, result := vision.ReadMjpeg(screen.Width, screen.Height, screen.Quality)
+		values = screen.Snapshot()
+
+		data, result := vision.ReadMjpeg(values.Width, values.Height, values.Quality)
 		stream.UpdateCaptureStatus(stream.CaptureModeMJPEG, result)
 		if result < 0 || result == 5 || len(data) == 0 {
 			continue
 		}
 
 		if s.frameCacheEnabled() {
-			s.setLatestFrame(data, screen.Width, screen.Height)
+			s.setLatestFrame(data, values.Width, values.Height)
 		}
 
 		for _, client := range clients {
@@ -118,8 +125,8 @@ func (s *Streamer) run() {
 			}
 		}
 
-		if screen.FPS != fps && screen.FPS != 0 {
-			fps = screen.FPS
+		if values.FPS != fps && values.FPS != 0 {
+			fps = values.FPS
 			ticker.Reset(time.Second / time.Duration(fps))
 		}
 
@@ -201,6 +208,10 @@ func writeFrame(c *gin.Context, data []byte) (err error) {
 			}
 		}
 	}()
+
+	// Without a deadline a client that stops reading blocks this loop, and with
+	// it every other viewer's stream. Not every writer supports deadlines.
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(writeTimeout))
 
 	header := "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + strconv.Itoa(len(data)) + "\r\n\r\n"
 	if _, err = c.Writer.WriteString(header); err != nil {

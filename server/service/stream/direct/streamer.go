@@ -89,7 +89,8 @@ func (s *Streamer) getClients() []*client {
 func (s *Streamer) run() {
 	screen := common.GetScreen()
 	common.CheckScreen()
-	fps := screen.FPS
+	values := screen.Snapshot()
+	fps := values.FPS
 
 	ticker := time.NewTicker(time.Second / time.Duration(fps))
 	defer ticker.Stop()
@@ -107,8 +108,10 @@ func (s *Streamer) run() {
 			continue
 		}
 
-		if screen.FPS != fps && screen.FPS != 0 {
-			fps = screen.FPS
+		values = screen.Snapshot()
+
+		if values.FPS != fps && values.FPS != 0 {
+			fps = values.FPS
 			ticker.Reset(time.Second / time.Duration(fps))
 		}
 
@@ -116,7 +119,7 @@ func (s *Streamer) run() {
 			continue
 		}
 
-		data, result := vision.ReadH264(screen.Width, screen.Height, screen.BitRate)
+		data, result := vision.ReadH264(values.Width, values.Height, values.BitRate)
 		stream.UpdateCaptureStatus(stream.CaptureModeDirect, result)
 		if result < 0 || len(data) == 0 {
 			continue

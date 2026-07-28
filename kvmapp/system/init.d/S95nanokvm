@@ -1,6 +1,25 @@
 #!/bin/sh
 # nanokvm Rev3.1
 
+# now_fps is rewritten whenever the measured frame rate changes, so a
+# streaming session rewrites it for as long as it runs. The value means
+# nothing across a reboot, and the card it lands on is the one the device
+# boots from, so point the path at tmpfs and leave a symlink behind. Both
+# readers keep the path they already use and neither needs rebuilding.
+#
+# kvm_system does not check the result of fopen before seeking on it, so a
+# missing file crashes it. The target is created here, before anything reads
+# it, and refreshed on restart in case tmpfs was cleared underneath us.
+prepare_runtime_state() {
+    mkdir -p /tmp/kvm
+    [ -e /tmp/kvm/now_fps ] || echo 0 > /tmp/kvm/now_fps
+
+    if [ ! -L /kvmapp/kvm/now_fps ]; then
+        rm -f /kvmapp/kvm/now_fps
+        ln -s /tmp/kvm/now_fps /kvmapp/kvm/now_fps
+    fi
+}
+
 case "$1" in
   start)
     echo -n kvm > /boot/hostname.prefix
@@ -63,6 +82,8 @@ case "$1" in
     fi
 
     # Start services
+    prepare_runtime_state
+
     cp -r /kvmapp/kvm_system /tmp/
     /tmp/kvm_system/kvm_system &
 
@@ -81,6 +102,8 @@ case "$1" in
     killall kvm_system
     killall NanoKVM-Server
     rm -r /tmp/kvm_system /tmp/server
+
+    prepare_runtime_state
 
     cp -r /kvmapp/kvm_system /tmp/
     /tmp/kvm_system/kvm_system &

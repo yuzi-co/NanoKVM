@@ -78,7 +78,9 @@ func create() {
 		err  error
 	)
 
-	_ = os.MkdirAll("/etc/kvm", 0o644)
+	// A directory needs its execute bit, otherwise nothing inside it can be
+	// opened by path.
+	_ = os.MkdirAll("/etc/kvm", 0o755)
 
 	file, err = os.OpenFile("/etc/kvm/server.yaml", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {

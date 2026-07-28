@@ -1,7 +1,6 @@
 package vm
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,7 +51,8 @@ func (s *Service) UploadScript(c *gin.Context) {
 		return
 	}
 
-	if !isScript(header.Filename) {
+	target, err := utils.SecureJoin(ScriptDirectory, header.Filename)
+	if err != nil || !isScript(header.Filename) {
 		rsp.ErrRsp(c, -2, "invalid arguments")
 		return
 	}
@@ -61,7 +61,6 @@ func (s *Service) UploadScript(c *gin.Context) {
 		_ = os.MkdirAll(ScriptDirectory, 0o755)
 	}
 
-	target := fmt.Sprintf("%s/%s", ScriptDirectory, header.Filename)
 	err = c.SaveUploadedFile(header, target)
 	if err != nil {
 		rsp.ErrRsp(c, -2, "save failed")
@@ -87,16 +86,19 @@ func (s *Service) RunScript(c *gin.Context) {
 		return
 	}
 
-	command := fmt.Sprintf("%s/%s", ScriptDirectory, req.Name)
-
-	name := strings.ToLower(req.Name)
-	if strings.HasSuffix(name, ".py") {
-		command = fmt.Sprintf("python %s", command)
+	// The name reaches a process argument, so it must be a plain file inside
+	// the script directory - never a path, and never shell metacharacters.
+	script, err := utils.SecureJoin(ScriptDirectory, req.Name)
+	if err != nil || !isScript(req.Name) {
+		rsp.ErrRsp(c, -1, "invalid arguments")
+		return
 	}
 
 	var output []byte
-	var err error
-	cmd := exec.Command("sh", "-c", command)
+	cmd := exec.Command(script)
+	if strings.HasSuffix(strings.ToLower(req.Name), ".py") {
+		cmd = exec.Command("python", script)
+	}
 
 	if req.Type == "foreground" {
 		output, err = cmd.CombinedOutput()
@@ -133,7 +135,11 @@ func (s *Service) DeleteScript(c *gin.Context) {
 		return
 	}
 
-	file := fmt.Sprintf("%s/%s", ScriptDirectory, req.Name)
+	file, err := utils.SecureJoin(ScriptDirectory, req.Name)
+	if err != nil {
+		rsp.ErrRsp(c, -1, "invalid arguments")
+		return
+	}
 
 	if err := os.Remove(file); err != nil {
 		log.Errorf("delete script %s failed: %s", file, err)

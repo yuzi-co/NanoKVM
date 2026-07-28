@@ -11,7 +11,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const AccountFile = "/etc/kvm/pwd"
+// AccountFile is a variable rather than a constant so tests can redirect it.
+var AccountFile = "/etc/kvm/pwd"
 
 type Account struct {
 	Username string `json:"username"`
@@ -40,6 +41,13 @@ func GetAccount() (*Account, error) {
 	return &account, nil
 }
 
+// isAccountConfigured reports whether a password has ever been set on this
+// device. Without the file, GetAccount falls back to the admin/admin default.
+func isAccountConfigured() bool {
+	_, err := os.Stat(AccountFile)
+	return err == nil
+}
+
 func SetAccount(username string, hashedPassword string) error {
 	account, err := json.Marshal(&Account{
 		Username: username,
@@ -50,13 +58,16 @@ func SetAccount(username string, hashedPassword string) error {
 		return err
 	}
 
-	err = os.MkdirAll(filepath.Dir(AccountFile), 0o644)
+	// 0o644 on a directory leaves it without the execute bit, so nothing
+	// inside can be opened by path.
+	err = os.MkdirAll(filepath.Dir(AccountFile), 0o755)
 	if err != nil {
 		log.Errorf("create directory %s failed: %s", AccountFile, err)
 		return err
 	}
 
-	err = os.WriteFile(AccountFile, account, 0o644)
+	// The file holds a password hash; only root needs to read it.
+	err = os.WriteFile(AccountFile, account, 0o600)
 	if err != nil {
 		log.Errorf("write password failed: %s", err)
 		return err

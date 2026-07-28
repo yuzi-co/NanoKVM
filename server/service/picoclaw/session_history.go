@@ -114,6 +114,29 @@ func isOpaqueSessionKey(key string) bool {
 	return strings.HasPrefix(key, opaqueSessionKeyPrefix)
 }
 
+// sessionFileBase maps a session id from a request onto the file base it
+// refers to, refusing anything that would leave the sessions directory.
+//
+// Only path escape is rejected, not unusual characters: the runtime names
+// these files, not this server, so an allowlist would risk making real
+// sessions impossible to open or delete.
+func sessionFileBase(sessionID string) (string, bool) {
+	base := sessionID
+	if !isOpaqueSessionKey(sessionID) {
+		base = sanitizeSessionKey(picoSessionPrefix + sessionID)
+	}
+
+	if base == "" || base == opaqueSessionKeyPrefix || base == sanitizedPicoSessionPrefix {
+		return "", false
+	}
+
+	if strings.ContainsAny(base, `/\`) || base != filepath.Base(base) {
+		return "", false
+	}
+
+	return base, true
+}
+
 func extractOpaqueSessionID(fileName string) (string, bool) {
 	base := strings.TrimSuffix(fileName, filepath.Ext(fileName))
 	if strings.HasSuffix(fileName, ".meta.json") {
@@ -244,6 +267,11 @@ func (s *Service) GetSession(c *gin.Context) {
 		return
 	}
 
+	if _, ok := sessionFileBase(sessionID); !ok {
+		writePicoclawError(c, newPicoclawError(CodeInvalidAction, "invalid session id"))
+		return
+	}
+
 	dir, err := resolvePicoclawSessionsPath()
 	if err != nil {
 		writePicoclawError(c, newPicoclawError(CodeRuntimeUnavailable, "failed to resolve sessions directory"))
@@ -300,18 +328,19 @@ func (s *Service) DeleteSession(c *gin.Context) {
 		return
 	}
 
+	fileBase, ok := sessionFileBase(sessionID)
+	if !ok {
+		writePicoclawError(c, newPicoclawError(CodeInvalidAction, "invalid session id"))
+		return
+	}
+
 	dir, err := resolvePicoclawSessionsPath()
 	if err != nil {
 		writePicoclawError(c, newPicoclawError(CodeRuntimeUnavailable, "failed to resolve sessions directory"))
 		return
 	}
 
-	var base string
-	if isOpaqueSessionKey(sessionID) {
-		base = filepath.Join(dir, sessionID)
-	} else {
-		base = filepath.Join(dir, sanitizeSessionKey(picoSessionPrefix+sessionID))
-	}
+	base := filepath.Join(dir, fileBase)
 	paths := []string{base + ".jsonl", base + ".meta.json", base + ".json"}
 	removed := false
 

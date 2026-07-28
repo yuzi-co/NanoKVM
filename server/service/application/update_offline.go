@@ -147,8 +147,15 @@ func saveUploadedFile(part *multipart.Part, contentLength int64) (string, error)
 	pw := newProgressWriter(out, contentLength)
 	defer pw.Stop()
 
-	if _, err := io.Copy(pw, part); err != nil {
+	// The rootfs lives on the SD card, so an unbounded upload fills the device.
+	written, err := io.Copy(pw, io.LimitReader(part, maxPackageSize+1))
+	if err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	if written > maxPackageSize {
+		_ = os.Remove(outPath)
+		return "", fmt.Errorf("package is too large")
 	}
 
 	return outPath, nil

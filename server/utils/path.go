@@ -14,14 +14,20 @@ var safeName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
 
 var errUnsafeName = errors.New("unsafe file name")
 
+// IsSafeFileName reports whether name is a plain file name: no directory
+// components, no traversal, and nothing a shell would treat specially.
+func IsSafeFileName(name string) bool {
+	if !safeName.MatchString(name) {
+		return false
+	}
+
+	return name == filepath.Base(name)
+}
+
 // SecureJoin joins a caller-supplied file name onto a directory, rejecting
 // anything that is not a plain name inside that directory.
 func SecureJoin(dir string, name string) (string, error) {
-	if !safeName.MatchString(name) {
-		return "", errUnsafeName
-	}
-
-	if name != filepath.Base(name) {
+	if !IsSafeFileName(name) {
 		return "", errUnsafeName
 	}
 

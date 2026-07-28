@@ -10,10 +10,21 @@ import (
 	"time"
 
 	"NanoKVM-Server/proto"
+	"NanoKVM-Server/utils"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+// maxPackageSize caps an update package. The rootfs lives on the SD card, so
+// an unbounded download fills the device it boots from.
+const maxPackageSize = 512 * 1024 * 1024
+
+// manifestTimeout bounds the latest.json fetch.
+const manifestTimeout = 30 * time.Second
+
+// maxManifestSize caps the manifest body itself.
+const maxManifestSize = 64 * 1024
 
 type Latest struct {
 	Version string `json:"version"`
@@ -57,7 +68,11 @@ func getLatest() (*Latest, error) {
 
 	url := fmt.Sprintf("%s/latest.json?now=%d", baseURL, time.Now().Unix())
 
-	resp, err := http.Get(url)
+	// The UI calls this, so a wedged server would otherwise pin a goroutine
+	// and a socket for every version check.
+	client := &http.Client{Timeout: manifestTimeout}
+
+	resp, err := client.Get(url)
 	if err != nil {
 		log.Debugf("failed to request version: %v", err)
 		return nil, err
@@ -66,7 +81,7 @@ func getLatest() (*Latest, error) {
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestSize))
 	if err != nil {
 		log.Errorf("failed to read response: %v", err)
 		return nil, err
@@ -77,14 +92,37 @@ func getLatest() (*Latest, error) {
 		return nil, fmt.Errorf("status code %d", resp.StatusCode)
 	}
 
+	latest, err := parseLatest(body, baseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Debugf("get application latest version: %s", latest.Version)
+	return latest, nil
+}
+
+// parseLatest reads the manifest and refuses anything it would not be safe to
+// act on. The name decides both the URL and where the package is written, and
+// it is written before the checksum has had a chance to reject the package, so
+// it has to be a plain file name.
+func parseLatest(body []byte, baseURL string) (*Latest, error) {
 	var latest Latest
 	if err := json.Unmarshal(body, &latest); err != nil {
 		log.Errorf("failed to unmarshal response: %s", err)
 		return nil, err
 	}
 
+	if !utils.IsSafeFileName(latest.Name) {
+		log.Errorf("refusing update package name: %q", latest.Name)
+		return nil, fmt.Errorf("invalid package name")
+	}
+
+	if latest.Size > maxPackageSize {
+		log.Errorf("refusing update package of %d bytes", latest.Size)
+		return nil, fmt.Errorf("package is too large")
+	}
+
 	latest.Url = fmt.Sprintf("%s/%s", baseURL, latest.Name)
 
-	log.Debugf("get application latest version: %s", latest.Version)
 	return &latest, nil
 }

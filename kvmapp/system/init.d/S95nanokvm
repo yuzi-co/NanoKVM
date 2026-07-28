@@ -32,6 +32,24 @@ case "$1" in
     iptables -C OUTPUT -o eth0 -p tcp --sport 8000 -m state --state ESTABLISHED -j DROP 2>/dev/null || \
     iptables -A OUTPUT -o eth0 -p tcp --sport 8000 -m state --state ESTABLISHED -j DROP
 
+    # Never answer DHCP on the wired network. udhcpd serves the USB and the
+    # WiFi AP subnets, but it listens for 255.255.255.255 broadcasts, and the
+    # kernel does not reliably confine that to the interface it was bound to.
+    # A NanoKVM plugged into an office LAN then offers addresses from its own
+    # private subnet to any machine that asks, which breaks them.
+    #
+    # These match the server port only, so the DHCP client that gives this
+    # device its own address is untouched: it sends and listens on port 68,
+    # and acquires its first lease over a raw socket that never reaches these
+    # chains. Insert at the top so no earlier accept can win.
+    if [ ! -e /boot/dhcp.eth0 ]; then
+        iptables -C INPUT -i eth0 -p udp --dport 67 -j DROP 2>/dev/null || \
+        iptables -I INPUT -i eth0 -p udp --dport 67 -j DROP
+
+        iptables -C OUTPUT -o eth0 -p udp --sport 67 -j DROP 2>/dev/null || \
+        iptables -I OUTPUT -o eth0 -p udp --sport 67 -j DROP
+    fi
+
     # Logo selection
     if [ -f /boot/logo.ico ]; then
         if [ ! -f /kvmapp/server/web/original.ico ]; then

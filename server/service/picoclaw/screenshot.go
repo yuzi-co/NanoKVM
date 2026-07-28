@@ -60,8 +60,8 @@ func (s *Service) Screenshot(c *gin.Context) {
 func (s *Service) captureScreenshot(ctx context.Context, query ScreenshotQuery) ([]byte, ScreenshotMeta, *PicoclawError) {
 	width, height, quality := resolveScreenshotRequest(query)
 
-	screen := common.GetScreen()
 	common.CheckScreen()
+	values := common.GetScreen().Snapshot()
 	releaseLease, claimFresh, leaseErr := s.acquireCaptureLease(ctx)
 	if leaseErr != nil {
 		return nil, ScreenshotMeta{}, newPicoclawError(CodeScreenshotFailed, "screenshot capture canceled")
@@ -94,8 +94,8 @@ func (s *Service) captureScreenshot(ctx context.Context, query ScreenshotQuery) 
 				continue
 			}
 			return data, ScreenshotMeta{
-				SourceWidth:   screen.Width,
-				SourceHeight:  screen.Height,
+				SourceWidth:   values.Width,
+				SourceHeight:  values.Height,
 				CaptureWidth:  width,
 				CaptureHeight: height,
 				Format:        "jpeg",
@@ -107,10 +107,10 @@ func (s *Service) captureScreenshot(ctx context.Context, query ScreenshotQuery) 
 }
 
 func resolveScreenshotRequest(query ScreenshotQuery) (uint16, uint16, uint16) {
-	screen := common.GetScreen()
-	width := screen.Width
-	height := screen.Height
-	quality := screen.Quality
+	values := common.GetScreen().Snapshot()
+	width := values.Width
+	height := values.Height
+	quality := values.Quality
 
 	if query.Format == "base64" {
 		width, height = fitWithinBounds(width, height, defaultPicoclawScreenshotWidth, defaultPicoclawScreenshotHeight)

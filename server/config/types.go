@@ -11,6 +11,9 @@ type Config struct {
 	Stun           string   `yaml:"stun"`
 	Turn           Turn     `yaml:"turn"`
 	Security       Security `yaml:"security"`
+	// Proxy reaches the internet through an intermediary. A complete URL or a
+	// bare host:port. Empty means the environment decides.
+	Proxy string `yaml:"proxy"`
 
 	Hardware Hardware `yaml:"-"`
 }

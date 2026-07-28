@@ -70,7 +70,7 @@ func getLatest() (*Latest, error) {
 
 	// The UI calls this, so a wedged server would otherwise pin a goroutine
 	// and a socket for every version check.
-	client := &http.Client{Timeout: manifestTimeout}
+	client := utils.OutboundClient(manifestTimeout)
 
 	resp, err := client.Get(url)
 	if err != nil {

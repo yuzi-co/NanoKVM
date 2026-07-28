@@ -98,12 +98,11 @@ start_usb_dev(){
 
     if [ ! -e /boot/disable_hid ]
     then
-        # keyboard
+        # keyboard: boot protocol, so firmware that only speaks boot HID
+        # accepts it. Declaring boot support does not remove the report
+        # descriptor, so a host that prefers report protocol is unaffected.
         mkdir functions/hid.GS0
-        if [ -e /boot/BIOS ]
-        then
-            echo 1 > functions/hid.GS0/subclass
-        fi
+        echo 1 > functions/hid.GS0/subclass
         if [ -e /boot/usb.wakeup ]
         then
             echo 1 > functions/hid.GS0/wakeup_on_write
@@ -113,12 +112,9 @@ start_usb_dev(){
         echo -ne \\x05\\x01\\x09\\x06\\xa1\\x01\\x05\\x07\\x19\\xe0\\x29\\xe7\\x15\\x00\\x25\\x01\\x75\\x01\\x95\\x08\\x81\\x02\\x95\\x01\\x75\\x08\\x81\\x03\\x95\\x05\\x75\\x01\\x05\\x08\\x19\\x01\\x29\\x05\\x91\\x02\\x95\\x01\\x75\\x03\\x91\\x03\\x95\\x06\\x75\\x08\\x15\\x00\\x25\\xE7\\x05\\x07\\x19\\x00\\x29\\xE7\\x81\\x00\\xc0 > functions/hid.GS0/report_desc
         ln -s functions/hid.GS0 configs/c.1
 
-        # mouse
+        # relative mouse: boot protocol, same reasoning as the keyboard
         mkdir functions/hid.GS1
-        if [ -e /boot/BIOS ]
-        then
-            echo 1 > functions/hid.GS1/subclass
-        fi
+        echo 1 > functions/hid.GS1/subclass
         if [ -e /boot/usb.wakeup ]
         then
             echo 1 > functions/hid.GS1/wakeup_on_write
@@ -128,12 +124,10 @@ start_usb_dev(){
         echo -ne \\x5\\x1\\x9\\x2\\xa1\\x1\\x9\\x1\\xa1\\x0\\x5\\x9\\x19\\x1\\x29\\x3\\x15\\x0\\x25\\x1\\x95\\x3\\x75\\x1\\x81\\x2\\x95\\x1\\x75\\x5\\x81\\x3\\x5\\x1\\x9\\x30\\x9\\x31\\x9\\x38\\x15\\x81\\x25\\x7f\\x75\\x8\\x95\\x3\\x81\\x6\\xc0\\xc0 > functions/hid.GS1/report_desc
         ln -s functions/hid.GS1 configs/c.1
 
-        # touchpad
+        # absolute pointer: never boot. The boot mouse protocol has no
+        # absolute coordinates, so claiming it here described a device this
+        # is not, and a host taking that at face value got nonsense.
         mkdir functions/hid.GS2
-        if [ -e /boot/BIOS ]
-        then
-            echo 1 > functions/hid.GS2/subclass
-        fi
         if [ -e /boot/usb.wakeup ]
         then
             echo 1 > functions/hid.GS2/wakeup_on_write

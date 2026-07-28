@@ -60,9 +60,9 @@ start_usb_dev(){
     echo -ne \\x5\\x1\\x9\\x2\\xa1\\x1\\x9\\x1\\xa1\\x0\\x5\\x9\\x19\\x1\\x29\\x3\\x15\\x0\\x25\\x1\\x95\\x3\\x75\\x1\\x81\\x2\\x95\\x1\\x75\\x5\\x81\\x3\\x5\\x1\\x9\\x30\\x9\\x31\\x9\\x38\\x15\\x81\\x25\\x7f\\x75\\x8\\x95\\x3\\x81\\x6\\xc0\\xc0 > functions/hid.GS1/report_desc
     ln -s functions/hid.GS1 configs/c.1
 
-    # touchpad
+    # absolute pointer: never boot. The boot mouse protocol has no absolute
+    # coordinates, so claiming it here described a device this is not.
     mkdir functions/hid.GS2
-    echo 1 > functions/hid.GS2/subclass
     if [ -e /boot/usb.wakeup ]
     then
         echo 1 > functions/hid.GS2/wakeup_on_write

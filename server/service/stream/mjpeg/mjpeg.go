@@ -22,10 +22,17 @@ func Connect(c *gin.Context) {
 	c.Header("Pragma", "no-cache")
 	c.Header("X-Server-Date", time.Now().Format(time.RFC1123))
 
-	streamer.AddClient(c)
-	defer streamer.RemoveClient(c)
+	client := streamer.AddClient(c)
 
-	<-c.Request.Context().Done()
+	// Wait for the client to go away, or for its writer to give up on it.
+	select {
+	case <-c.Request.Context().Done():
+	case <-client.failed:
+	}
+
+	// RemoveClient waits for the writer to stop, which has to happen before
+	// this handler returns and the response writer is recycled.
+	streamer.RemoveClient(c)
 }
 
 func GetLatestFrame() (LatestFrame, bool) {

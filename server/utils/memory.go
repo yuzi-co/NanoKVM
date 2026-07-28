@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"runtime/debug"
 	"strconv"
@@ -10,7 +11,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const GoMemLimitFile = "/etc/kvm/GOMEMLIMIT"
+// GoMemLimitFile is a var so tests can point it somewhere writable.
+var GoMemLimitFile = "/etc/kvm/GOMEMLIMIT"
 
 func InitGoMemLimit() {
 	if !IsGoMemLimitExist() {
@@ -60,7 +62,9 @@ func GetGoMemLimit() (int64, error) {
 }
 
 func DelGoMemLimit() error {
-	debug.SetMemoryLimit(1024 * 1024 * 1024)
+	// math.MaxInt64 is Go's "no limit" value. A literal 1GB is a real cap on
+	// the 1GB boards, which is the opposite of turning the limit off.
+	debug.SetMemoryLimit(math.MaxInt64)
 
 	err := os.Remove(GoMemLimitFile)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"NanoKVM-Server/service/inputcontrol"
 
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestHeartbeatTimeoutReleasesManualLease(t *testing.T) {
@@ -108,5 +109,131 @@ func TestMouseReportStartsCooldown(t *testing.T) {
 				t.Fatalf("mouseReportStartsCooldown(%v) = %v, want %v", tt.report, got, tt.want)
 			}
 		})
+	}
+}
+
+// drain reads everything currently buffered.
+func drain(queue chan hid.QueuedReport) []hid.QueuedReport {
+	var got []hid.QueuedReport
+	for {
+		select {
+		case report := <-queue:
+			got = append(got, report)
+		default:
+			return got
+		}
+	}
+}
+
+// testReport builds a report the tests can identify by its payload.
+func testReport(payload string) hid.QueuedReport {
+	return hid.QueuedReport{Data: []byte(payload)}
+}
+
+func TestSendQueueDeliversWhenThereIsRoom(t *testing.T) {
+	queue := make(chan hid.QueuedReport, 2)
+
+	if !sendQueue(queue, testReport("a")) {
+		t.Fatal("expected the event to be accepted")
+	}
+
+	got := drain(queue)
+	if len(got) != 1 || string(got[0].Data) != "a" {
+		t.Fatalf("expected the event to be queued, got %d entries", len(got))
+	}
+}
+
+func TestSendQueueNeverBlocksWhenFull(t *testing.T) {
+	// A stuck HID device backs the queue up. Blocking here stalls the whole
+	// websocket read loop, so heartbeats stop being read and the session dies.
+	queue := make(chan hid.QueuedReport, 2)
+	queue <- testReport("a")
+	queue <- testReport("b")
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- sendQueue(queue, testReport("c"))
+	}()
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("expected the newest event to be accepted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sendQueue blocked on a full queue")
+	}
+}
+
+func TestSendQueueDropsTheOldestEventWhenFull(t *testing.T) {
+	// HID reports carry absolute state, not deltas, so the newest report
+	// describes the truth. Stale reports are the ones worth losing.
+	queue := make(chan hid.QueuedReport, 2)
+	queue <- testReport("a")
+	queue <- testReport("b")
+
+	sendQueue(queue, testReport("c"))
+
+	got := drain(queue)
+	if len(got) != 2 {
+		t.Fatalf("expected the queue to stay at capacity, got %d entries", len(got))
+	}
+
+	if string(got[0].Data) != "b" || string(got[1].Data) != "c" {
+		t.Fatalf("expected the oldest event to be dropped, got %q and %q", got[0].Data, got[1].Data)
+	}
+}
+
+func TestSendQueueCompletesTheEventItDrops(t *testing.T) {
+	// A dropped report still holds a control reservation. Leaving it
+	// uncompleted holds that reservation until the session ends, which blocks
+	// a switch to PicoClaw.
+	completed := make(chan bool, 1)
+	queue := make(chan hid.QueuedReport, 1)
+	queue <- hid.QueuedReport{
+		Data:     []byte("a"),
+		Complete: func(ok bool) { completed <- ok },
+	}
+
+	sendQueue(queue, testReport("b"))
+
+	select {
+	case ok := <-completed:
+		if ok {
+			t.Fatal("expected the dropped event to be completed as a failure")
+		}
+	default:
+		t.Fatal("expected the dropped event to be completed")
+	}
+}
+
+func TestSendQueueReportsAClosedQueue(t *testing.T) {
+	queue := make(chan hid.QueuedReport, 1)
+	close(queue)
+
+	if sendQueue(queue, testReport("a")) {
+		t.Fatal("expected a closed queue to be reported")
+	}
+}
+
+func TestSendQueueReportsANilQueue(t *testing.T) {
+	if sendQueue(nil, testReport("a")) {
+		t.Fatal("expected a nil queue to be reported")
+	}
+}
+
+func TestTracingAMessageCostsNothingWhenDebugIsOff(t *testing.T) {
+	previous := log.GetLevel()
+	log.SetLevel(log.ErrorLevel)
+	t.Cleanup(func() { log.SetLevel(previous) })
+
+	event := []byte{MouseEvent, 0, 1, 2}
+
+	allocs := testing.AllocsPerRun(200, func() {
+		traceMessage(2, event)
+	})
+
+	if allocs != 0 {
+		t.Fatalf("expected no allocations while debug logging is off, got %v", allocs)
 	}
 }

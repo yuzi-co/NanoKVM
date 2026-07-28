@@ -81,7 +81,7 @@ func (c *Client) Read() error {
 			continue
 		}
 
-		log.Debugf("received message %d: %v", messageType, data)
+		traceMessage(messageType, data)
 
 		switch data[0] {
 		case Heartbeat:
@@ -214,6 +214,17 @@ func (c *Client) Close() {
 	log.Debug("websocket disconnected")
 }
 
+// traceMessage logs an inbound event only when someone is listening. This runs
+// once per keystroke and per mouse move, and the variadic call allocates even
+// when the level is off.
+func traceMessage(messageType int, data []byte) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+
+	log.Debugf("received message %d: %v", messageType, data)
+}
+
 func writeQueue(queue chan hid.QueuedReport, report hid.QueuedReport) bool {
 	if !sendQueue(queue, report) {
 		report.Complete(false)
@@ -223,6 +234,10 @@ func writeQueue(queue chan hid.QueuedReport, report hid.QueuedReport) bool {
 	return true
 }
 
+// sendQueue hands an event to a HID writer without ever blocking. A host that
+// has stopped accepting HID reports backs the queue up, and blocking here would
+// stall the websocket read loop, so heartbeats would stop being read and the
+// session would look dead. Reports whether the queue is still usable.
 func sendQueue(queue chan hid.QueuedReport, report hid.QueuedReport) (ok bool) {
 	if queue == nil {
 		return false
@@ -234,6 +249,27 @@ func sendQueue(queue chan hid.QueuedReport, report hid.QueuedReport) (ok bool) {
 		}
 	}()
 
-	queue <- report
+	// Only the read loop produces here, so evicting once is always enough to
+	// make room. The bound is a guard, not an expectation.
+	for range cap(queue) + 1 {
+		select {
+		case queue <- report:
+			return true
+		default:
+		}
+
+		// Drop the stalest report. HID reports carry absolute state rather
+		// than deltas, so the newest one describes the truth on its own and
+		// the backlog is worth losing. The evicted report still has to be
+		// completed, or the control reservation it holds is never released.
+		select {
+		case stale := <-queue:
+			if stale.Complete != nil {
+				stale.Complete(false)
+			}
+		default:
+		}
+	}
+
 	return true
 }

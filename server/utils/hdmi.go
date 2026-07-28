@@ -2,13 +2,37 @@ package utils
 
 import (
 	"os"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 )
 
 const (
 	HDMIDisableFile = "/etc/kvm/hdmi_disable"
+
+	// HDMISignalFile is written by the capture library: 1 once it is getting
+	// frames off the port, 0 when it cannot. That is the physical presence of
+	// a signal, which is not the same thing as capture being switched on.
+	HDMISignalFile = "/kvmapp/kvm/state"
 )
+
+// HasHDMISignal reports whether the port is currently carrying a picture.
+// Callers use this to tell a sleeping machine from an awake one.
+func HasHDMISignal() bool {
+	return readHDMISignal(HDMISignalFile)
+}
+
+func readHDMISignal(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Error("failed to read hdmi signal state:", err)
+		}
+		return false
+	}
+
+	return strings.TrimSpace(string(data)) == "1"
+}
 
 func PersistHDMIDisabled() {
 	f, err := os.OpenFile(HDMIDisableFile, os.O_CREATE|os.O_RDONLY, 0644)

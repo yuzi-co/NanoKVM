@@ -57,8 +57,15 @@ func update() error {
 		return err
 	}
 
-	// download
-	target := fmt.Sprintf("%s/%s", CacheDir, latest.Name)
+	// download. parseLatest already refused anything but a plain file name;
+	// joining it safely here keeps that true if the manifest ever grows a
+	// second path.
+	target, err := utils.SecureJoin(CacheDir, latest.Name)
+	if err != nil {
+		log.Errorf("refusing update package name %q: %s", latest.Name, err)
+		return err
+	}
+
 	if err := download(latest.Url, target); err != nil {
 		log.Errorf("download app failed: %s", err)
 		return err
@@ -94,7 +101,7 @@ func download(url string, target string) (err error) {
 		}
 
 		log.Debugf("update will be saved to: %s", target)
-		err = utils.Download(req, target)
+		err = utils.Download(req, target, utils.DownloadOptions{MaxBytes: maxPackageSize})
 		if err != nil {
 			log.Errorf("downloading latest application failed, try again...")
 			continue

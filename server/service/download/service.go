@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -336,14 +335,9 @@ func (s *Service) DownloadImage(c *gin.Context) {
 		return
 	}
 
-	u, err := url.Parse(req.File)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" {
-		rsp.ErrRsp(c, -1, "invalid url")
-		return
-	}
-	filename := filepath.Base(u.Path)
-	if filename == "." || filename == "/" || filename == "" {
-		rsp.ErrRsp(c, -1, "invalid url")
+	filename, err := imageFilenameFromURL(req.File)
+	if err != nil {
+		rsp.ErrRsp(c, -1, err.Error())
 		return
 	}
 
@@ -411,7 +405,7 @@ func (s *Service) downloadRemoteImage(
 		return fmt.Errorf("create download request failed: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := imageClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download request failed: %w", err)
 	}
@@ -421,7 +415,19 @@ func (s *Service) downloadRemoteImage(
 		return fmt.Errorf("download request returned status %d", resp.StatusCode)
 	}
 
-	tempFile, err := os.CreateTemp("/data", ".nanokvm-download-*")
+	// The rootfs shares this card, so a download must not be able to fill it.
+	available, err := availableBytes(imageDir)
+	if err != nil {
+		return fmt.Errorf("failed to check free space: %w", err)
+	}
+
+	if !fitsOnDisk(resp.ContentLength, available) {
+		return errNotEnoughSpace
+	}
+
+	limit := available - reservedFreeBytes
+
+	tempFile, err := os.CreateTemp(imageDir, ".nanokvm-download-*")
 	if err != nil {
 		return fmt.Errorf("create temporary image failed: %w", err)
 	}
@@ -430,7 +436,13 @@ func (s *Service) downloadRemoteImage(
 
 	hasher := sha256.New()
 	lw := newLoggingWriter(io.MultiWriter(tempFile, hasher), resp.ContentLength, onProgress)
-	_, copyErr := io.Copy(lw, resp.Body)
+
+	// A server that understates Content-Length must not get past the check
+	// above, so the copy is bounded too.
+	written, copyErr := io.Copy(lw, io.LimitReader(resp.Body, limit+1))
+	if copyErr == nil && written > limit {
+		copyErr = errNotEnoughSpace
+	}
 	lw.stopTicker()
 	closeErr := tempFile.Close()
 	if ctx.Err() != nil {
@@ -450,7 +462,7 @@ func (s *Service) downloadRemoteImage(
 		return ctx.Err()
 	}
 
-	destPath := filepath.Join("/data", filename)
+	destPath := filepath.Join(imageDir, filename)
 	if err := os.Rename(tempPath, destPath); err != nil {
 		return fmt.Errorf("install downloaded image failed: %w", err)
 	}

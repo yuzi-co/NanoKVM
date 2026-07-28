@@ -3,6 +3,7 @@ package mjpeg
 import (
 	"NanoKVM-Server/common"
 	"NanoKVM-Server/service/stream"
+	"NanoKVM-Server/service/vm"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+// viewerSource names this stream in the idle capture accounting. A client
+// switching between stream types is briefly counted on both.
+const viewerSource = "mjpeg"
 
 type Streamer struct {
 	mutex          sync.Mutex
@@ -36,8 +41,12 @@ func (s *Streamer) AddClient(c *gin.Context) *client {
 
 	s.mutex.Lock()
 	s.clients[c] = client
-	s.updateClientSnapshotLocked()
+	count := s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
+
+	// Outside the lock: resuming capture is slow, and this lock is on the
+	// path that hands frames to every other viewer.
+	vm.SetViewerCount(viewerSource, count)
 
 	if atomic.CompareAndSwapInt32(&s.running, 0, 1) {
 		go s.run()
@@ -53,6 +62,8 @@ func (s *Streamer) RemoveClient(c *gin.Context) {
 	delete(s.clients, c)
 	count := s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
+
+	vm.SetViewerCount(viewerSource, count)
 
 	if exists {
 		client.stop()

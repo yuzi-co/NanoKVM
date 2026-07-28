@@ -28,10 +28,8 @@ func (s *Service) ResetHdmi(c *gin.Context) {
 func (s *Service) EnableHdmi(c *gin.Context) {
 	var rsp proto.Response
 
-	vision := common.GetKvmVision()
-
-	vision.SetHDMI(true)
 	utils.PersistHDMIEnabled()
+	EnableHdmiCapture()
 
 	rsp.OkRsp(c)
 	log.Debug("enable hdmi")
@@ -40,13 +38,27 @@ func (s *Service) EnableHdmi(c *gin.Context) {
 func (s *Service) DisableHdmi(c *gin.Context) {
 	var rsp proto.Response
 
-	vision := common.GetKvmVision()
-
-	vision.SetHDMI(false)
 	utils.PersistHDMIDisabled()
+	DisableHdmiCapture()
 
 	rsp.OkRsp(c)
 	log.Debug("disable hdmi")
+}
+
+func (s *Service) SetHdmiIdleTimeout(c *gin.Context) {
+	var req proto.SetHdmiIdleTimeoutReq
+	var rsp proto.Response
+
+	if err := proto.ParseFormRequest(c, &req); err != nil {
+		rsp.ErrRsp(c, -1, "invalid arguments")
+		return
+	}
+
+	utils.PersistHDMIIdleTimeout(req.Minutes)
+	ApplyHdmiIdleTimeout()
+
+	rsp.OkRsp(c)
+	log.Debugf("set hdmi idle timeout to %d minutes", req.Minutes)
 }
 
 func (s *Service) GetHdmiState(c *gin.Context) {
@@ -58,8 +70,9 @@ func (s *Service) GetHdmiState(c *gin.Context) {
 	enabled := !utils.IsHdmiDisabled()
 
 	rsp.OkRspWithData(c, &proto.GetGetHdmiStateRsp{
-		Enabled: enabled,
-		Signal:  enabled && utils.HasHDMISignal(),
+		Enabled:     enabled,
+		Signal:      enabled && utils.HasHDMISignal(),
+		IdleTimeout: utils.GetHDMIIdleTimeout(),
 	})
 
 	log.Debug("get hdmi state")

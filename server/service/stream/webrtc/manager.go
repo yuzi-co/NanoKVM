@@ -3,6 +3,7 @@ package webrtc
 import (
 	"NanoKVM-Server/common"
 	"NanoKVM-Server/service/stream"
+	"NanoKVM-Server/service/vm"
 	"sync/atomic"
 	"time"
 
@@ -10,6 +11,10 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 	log "github.com/sirupsen/logrus"
 )
+
+// viewerSource names this stream in the idle capture accounting. A client
+// switching between stream types is briefly counted on both.
+const viewerSource = "webrtc"
 
 func NewWebRTCManager() *WebRTCManager {
 	m := &WebRTCManager{
@@ -29,6 +34,10 @@ func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
 	count := m.updateClientSnapshotLocked()
 	m.mutex.Unlock()
 
+	// Outside the lock: resuming capture is slow, and this lock is on the
+	// path that hands frames to every other viewer.
+	vm.SetViewerCount(viewerSource, count)
+
 	log.Debugf("added client %s, total clients: %d", ws.RemoteAddr(), count)
 }
 
@@ -37,6 +46,10 @@ func (m *WebRTCManager) RemoveClient(ws *websocket.Conn) {
 	delete(m.clients, ws)
 	count := m.updateClientSnapshotLocked()
 	m.mutex.Unlock()
+
+	// Outside the lock: resuming capture is slow, and this lock is on the
+	// path that hands frames to every other viewer.
+	vm.SetViewerCount(viewerSource, count)
 
 	log.Debugf("removed client %s, total clients: %d", ws.RemoteAddr(), count)
 }

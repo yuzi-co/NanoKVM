@@ -104,6 +104,14 @@ type GetGetHdmiStateRsp struct {
 	// Signal reports whether the port is actually carrying a picture, which
 	// is how a caller tells a sleeping machine from an awake one.
 	Signal bool `json:"signal"`
+
+	// IdleTimeout is how many minutes without a viewer capture keeps running.
+	// Zero means it never stops.
+	IdleTimeout int `json:"idleTimeout"`
+}
+
+type SetHdmiIdleTimeoutReq struct {
+	Minutes int `json:"minutes" validate:"gte=0"`
 }
 
 type GetSSHStateRsp struct {

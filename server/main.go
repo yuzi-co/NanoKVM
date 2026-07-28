@@ -13,6 +13,7 @@ import (
 	"NanoKVM-Server/logger"
 	"NanoKVM-Server/middleware"
 	"NanoKVM-Server/router"
+	"NanoKVM-Server/service/vm"
 	"NanoKVM-Server/service/vm/jiggler"
 	"NanoKVM-Server/utils"
 
@@ -42,11 +43,11 @@ func initialize() {
 	_ = common.GetScreen()
 
 	// init HDMI
-	vision := common.GetKvmVision()
-	vision.SetHDMI(false)
+	common.GetKvmVision().SetHDMI(false)
 	time.Sleep(10 * time.Millisecond)
 	if !utils.IsHdmiDisabled() {
-		vision.SetHDMI(true)
+		// Starts the idle countdown too: nothing is watching yet.
+		vm.EnableHdmiCapture()
 	}
 
 	// run mouse jiggler

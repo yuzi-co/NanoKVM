@@ -10,7 +10,12 @@ import (
 
 	"NanoKVM-Server/common"
 	"NanoKVM-Server/service/stream"
+	"NanoKVM-Server/service/vm"
 )
+
+// viewerSource names this stream in the idle capture accounting. A client
+// switching between stream types is briefly counted on both.
+const viewerSource = "h264"
 
 type Streamer struct {
 	mutex          sync.Mutex
@@ -34,8 +39,12 @@ func (s *Streamer) addClient(ws *websocket.Conn) *client {
 
 	s.mutex.Lock()
 	s.clients[ws] = c
-	s.updateClientSnapshotLocked()
+	count := s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
+
+	// Outside the lock: resuming capture is slow, and this lock is on the
+	// path that hands frames to every other viewer.
+	vm.SetViewerCount(viewerSource, count)
 
 	if atomic.CompareAndSwapInt32(&s.running, 0, 1) {
 		go s.run()
@@ -51,6 +60,8 @@ func (s *Streamer) removeClient(ws *websocket.Conn) {
 	delete(s.clients, ws)
 	count := s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
+
+	vm.SetViewerCount(viewerSource, count)
 
 	if exists {
 		c.stop()

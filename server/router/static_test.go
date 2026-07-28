@@ -60,6 +60,63 @@ func getWithEncoding(t *testing.T, r *gin.Engine, path string, encoding string) 
 	return w
 }
 
+func TestHashedAssetsMayBeCachedForever(t *testing.T) {
+	// Vite puts a content hash in every filename under assets/, so a changed
+	// file arrives under a new name and the old one can never go stale.
+	dir, _ := webRootWithGzip(t, "assets/app-BRKOgzOS.js", scriptBody)
+	r := newTestEngine(t, dir)
+
+	w := getWithEncoding(t, r, "/assets/app-BRKOgzOS.js", "gzip")
+
+	got := w.Header().Get("Cache-Control")
+	if !strings.Contains(got, "immutable") || !strings.Contains(got, "max-age=31536000") {
+		t.Fatalf("Cache-Control = %q, want a long immutable cache", got)
+	}
+}
+
+func TestTheEntryDocumentIsNeverCached(t *testing.T) {
+	// Safari kept serving a bookmarked copy of the old UI, which loads but
+	// cannot talk to the device. index.html names the hashed assets, so it is
+	// the one file that must always be fetched fresh.
+	dir, _ := webRootWithGzip(t, "index.html", "<html></html>")
+	r := newTestEngine(t, dir)
+
+	for _, path := range []string{"/", "/index.html"} {
+		w := getWithEncoding(t, r, path, "gzip")
+
+		if got := w.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+			t.Fatalf("Cache-Control for %s = %q, want no-store", path, got)
+		}
+	}
+}
+
+func TestUnhashedFilesAreNotCachedForever(t *testing.T) {
+	// The icon and the service worker keep their names across updates, so an
+	// immutable cache would pin whatever shipped first.
+	dir, _ := webRootWithGzip(t, "sipeed.ico", "icon")
+	r := newTestEngine(t, dir)
+
+	w := getWithEncoding(t, r, "/sipeed.ico", "gzip")
+
+	if got := w.Header().Get("Cache-Control"); strings.Contains(got, "immutable") {
+		t.Fatalf("Cache-Control = %q, want no immutable cache", got)
+	}
+}
+
+func TestAPIResponsesAreLeftAlone(t *testing.T) {
+	// The static handler returns before touching an API request; caching
+	// policy for those belongs to the handlers that answer them.
+	dir, _ := webRootWithGzip(t, "assets/app.js", scriptBody)
+	r := newTestEngine(t, dir)
+	r.GET("/api/vm/hdmi", func(c *gin.Context) { c.String(http.StatusOK, "{}") })
+
+	w := getWithEncoding(t, r, "/api/vm/hdmi", "gzip")
+
+	if got := w.Header().Get("Cache-Control"); got != "" {
+		t.Fatalf("Cache-Control = %q, want the API response untouched", got)
+	}
+}
+
 func TestPrecompressedAssetIsServedWhenTheClientAcceptsGzip(t *testing.T) {
 	// Compressing on the fly would cost more CPU than the C906 has to spare,
 	// so the build ships the compressed copy alongside the original.

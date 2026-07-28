@@ -3,9 +3,6 @@ package mjpeg
 import (
 	"NanoKVM-Server/common"
 	"NanoKVM-Server/service/stream"
-	"fmt"
-	"net/http"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,15 +11,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// writeTimeout caps how long a single client may stall the fan-out loop.
-const writeTimeout = 5 * time.Second
-
-var crlf = []byte("\r\n")
-
 type Streamer struct {
 	mutex          sync.Mutex
-	clients        map[*gin.Context]bool
-	clientSnapshot atomic.Pointer[[]*gin.Context]
+	clients        map[*gin.Context]*client
+	clientSnapshot atomic.Pointer[[]*client]
 	running        int32
 	frameMutex     sync.RWMutex
 	latestFrame    LatestFrame
@@ -31,16 +23,19 @@ type Streamer struct {
 
 func NewStreamer() *Streamer {
 	s := &Streamer{
-		clients: make(map[*gin.Context]bool),
+		clients: make(map[*gin.Context]*client),
 	}
 	s.updateClientSnapshotLocked()
 
 	return s
 }
 
-func (s *Streamer) AddClient(c *gin.Context) {
+func (s *Streamer) AddClient(c *gin.Context) *client {
+	client := newClient(c)
+	go client.write()
+
 	s.mutex.Lock()
-	s.clients[c] = true
+	s.clients[c] = client
 	s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
 
@@ -48,20 +43,27 @@ func (s *Streamer) AddClient(c *gin.Context) {
 		go s.run()
 		log.Debug("mjpeg stream started")
 	}
+
+	return client
 }
 
 func (s *Streamer) RemoveClient(c *gin.Context) {
 	s.mutex.Lock()
+	client, exists := s.clients[c]
 	delete(s.clients, c)
 	count := s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
+
+	if exists {
+		client.stop()
+	}
 
 	log.Debugf("mjpeg connection removed, remaining clients: %d", count)
 }
 
 func (s *Streamer) updateClientSnapshotLocked() int {
-	clients := make([]*gin.Context, 0, len(s.clients))
-	for c := range s.clients {
+	clients := make([]*client, 0, len(s.clients))
+	for _, c := range s.clients {
 		clients = append(clients, c)
 	}
 	s.clientSnapshot.Store(&clients)
@@ -69,7 +71,7 @@ func (s *Streamer) updateClientSnapshotLocked() int {
 	return len(clients)
 }
 
-func (s *Streamer) getClients() []*gin.Context {
+func (s *Streamer) getClients() []*client {
 	clients := s.clientSnapshot.Load()
 	if clients == nil {
 		return nil
@@ -110,11 +112,10 @@ func (s *Streamer) run() {
 			s.setLatestFrame(data, values.Width, values.Height)
 		}
 
+		// Handing the frame over never blocks: a client that is behind gets
+		// the newest frame and the older one is dropped.
 		for _, client := range clients {
-			if err := writeFrame(client, data); err != nil {
-				log.Errorf("failed to write mjpeg frame for client %s: %s", client.Request.RemoteAddr, err)
-				s.RemoveClient(client)
-			}
+			client.enqueue(data)
 		}
 
 		if values.FPS != fps && values.FPS != 0 {
@@ -189,35 +190,4 @@ func (s *Streamer) getLatestFrame() (LatestFrame, bool) {
 		Height:     s.latestFrame.Height,
 		CapturedAt: s.latestFrame.CapturedAt,
 	}, true
-}
-
-func writeFrame(c *gin.Context, data []byte) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = c.Request.Context().Err()
-			if err == nil {
-				err = fmt.Errorf("panic recovered in writeFrame: %v", r)
-			}
-		}
-	}()
-
-	// Without a deadline a client that stops reading blocks this loop, and with
-	// it every other viewer's stream. Not every writer supports deadlines.
-	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(writeTimeout))
-
-	header := "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + strconv.Itoa(len(data)) + "\r\n\r\n"
-	if _, err = c.Writer.WriteString(header); err != nil {
-		return err
-	}
-
-	if _, err = c.Writer.Write(data); err != nil {
-		return err
-	}
-
-	if _, err = c.Writer.Write(crlf); err != nil {
-		return err
-	}
-
-	c.Writer.Flush()
-	return nil
 }

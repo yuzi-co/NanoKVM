@@ -1,9 +1,6 @@
 package direct
 
 import (
-	"NanoKVM-Server/common"
-	"NanoKVM-Server/service/stream"
-	"bytes"
 	"encoding/binary"
 	"sync"
 	"sync/atomic"
@@ -11,30 +8,33 @@ import (
 
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
-)
 
-// writeTimeout caps how long a single client may stall the fan-out loop.
-const writeTimeout = 5 * time.Second
+	"NanoKVM-Server/common"
+	"NanoKVM-Server/service/stream"
+)
 
 type Streamer struct {
 	mutex          sync.Mutex
-	clients        map[*websocket.Conn]bool
-	clientSnapshot atomic.Pointer[[]*websocket.Conn]
+	clients        map[*websocket.Conn]*client
+	clientSnapshot atomic.Pointer[[]*client]
 	running        int32
 }
 
 func newStreamer() *Streamer {
 	s := &Streamer{
-		clients: make(map[*websocket.Conn]bool),
+		clients: make(map[*websocket.Conn]*client),
 	}
 	s.updateClientSnapshotLocked()
 
 	return s
 }
 
-func (s *Streamer) addClient(ws *websocket.Conn) {
+func (s *Streamer) addClient(ws *websocket.Conn) *client {
+	c := newClient(ws)
+	go c.write()
+
 	s.mutex.Lock()
-	s.clients[ws] = true
+	s.clients[ws] = c
 	s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
 
@@ -42,28 +42,35 @@ func (s *Streamer) addClient(ws *websocket.Conn) {
 		go s.run()
 		log.Debug("h264 stream started")
 	}
+
+	return c
 }
 
 func (s *Streamer) removeClient(ws *websocket.Conn) {
 	s.mutex.Lock()
+	c, exists := s.clients[ws]
 	delete(s.clients, ws)
 	count := s.updateClientSnapshotLocked()
 	s.mutex.Unlock()
+
+	if exists {
+		c.stop()
+	}
 
 	log.Debugf("h264 websocket disconnected, remaining clients: %d", count)
 }
 
 func (s *Streamer) updateClientSnapshotLocked() int {
-	clients := make([]*websocket.Conn, 0, len(s.clients))
-	for client := range s.clients {
-		clients = append(clients, client)
+	clients := make([]*client, 0, len(s.clients))
+	for _, c := range s.clients {
+		clients = append(clients, c)
 	}
 	s.clientSnapshot.Store(&clients)
 
 	return len(clients)
 }
 
-func (s *Streamer) getClients() []*websocket.Conn {
+func (s *Streamer) getClients() []*client {
 	clients := s.clientSnapshot.Load()
 	if clients == nil {
 		return nil
@@ -101,16 +108,10 @@ func (s *Streamer) run() {
 			continue
 		}
 
-		isKeyFrame := byte(0)
-		if result == 3 {
-			isKeyFrame = byte(1)
-		}
-
+		isKeyFrame := result == 3
 		timestamp := time.Since(startTime).Microseconds()
 
-		if err := s.send(clients, isKeyFrame, timestamp, data); err != nil {
-			continue
-		}
+		s.send(clients, isKeyFrame, timestamp, data)
 
 		if values.FPS != fps && values.FPS != 0 {
 			fps = values.FPS
@@ -121,41 +122,24 @@ func (s *Streamer) run() {
 	}
 }
 
-func (s *Streamer) send(clients []*websocket.Conn, isKeyFrame byte, timestamp int64, data []byte) error {
-	buf := BufferPool.Get().(*bytes.Buffer)
-	defer BufferPool.Put(buf)
+// send hands the frame to every client's writer goroutine. The message is
+// built once and shared, so it must not be modified afterwards.
+func (s *Streamer) send(clients []*client, isKeyFrame bool, timestamp int64, data []byte) {
+	message := make([]byte, 0, 1+8+len(data))
 
-	buf.Reset()
-	buf.Grow(1 + 8 + len(data))
-
-	if err := buf.WriteByte(isKeyFrame); err != nil {
-		log.Errorf("failed to write keyframe flag: %s", err)
-		return err
+	flag := byte(0)
+	if isKeyFrame {
+		flag = 1
 	}
+	message = append(message, flag)
 
 	var tsBytes [8]byte
 	binary.LittleEndian.PutUint64(tsBytes[:], uint64(timestamp))
-	if _, err := buf.Write(tsBytes[:]); err != nil {
-		log.Errorf("failed to write timestamp: %s", err)
-		return err
+	message = append(message, tsBytes[:]...)
+
+	message = append(message, data...)
+
+	for _, c := range clients {
+		c.enqueue(message, isKeyFrame)
 	}
-
-	if _, err := buf.Write(data); err != nil {
-		log.Errorf("failed to write h264 data: %s", err)
-		return err
-	}
-
-	for _, client := range clients {
-		// Without a deadline a client that stops reading blocks this loop,
-		// and with it every other viewer's stream.
-		_ = client.SetWriteDeadline(time.Now().Add(writeTimeout))
-
-		if err := client.WriteMessage(websocket.BinaryMessage, buf.Bytes()); err != nil {
-			log.Errorf("failed to write message to client %s: %s.", client.RemoteAddr(), err)
-
-			s.removeClient(client)
-		}
-	}
-
-	return nil
 }

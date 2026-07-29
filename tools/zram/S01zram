@@ -1,0 +1,86 @@
+#!/bin/sh
+#
+# Compressed swap in RAM.
+#
+# A slot that boots from a loop image must not put swap inside that image:
+# swap writeback would route through the loop device, which itself needs memory
+# to make progress. zram avoids that dependency, and also keeps swap off the SD
+# card, which is the boot medium and wears out.
+#
+# There is deliberately no disk swap behind this. The trade is that exceeding
+# zram means the OOM killer rather than slow paging, so mem_limit caps how much
+# RAM zram may consume: it cannot grow into the pressure it exists to relieve.
+#
+# Install as /etc/init.d/S01zram, mode 755. Shutdown is already covered by the
+# swapoff -a that inittab runs at runlevel 0/6.
+
+ZRAM_DISKSIZE=96M
+ZRAM_MEM_LIMIT=40M
+ZRAM_COMP=lzo-rle
+
+start() {
+	printf "zram: "
+
+	if [ ! -e /dev/zram0 ]
+	then
+		insmod /mnt/system/ko/zsmalloc.ko 2>/dev/null
+		insmod /mnt/system/ko/zram.ko 2>/dev/null
+	fi
+
+	if [ ! -e /dev/zram0 ]
+	then
+		echo "FAIL (no zram device)"
+		return 1
+	fi
+
+	if grep -q '^/dev/zram0 ' /proc/swaps
+	then
+		echo "already active"
+		return 0
+	fi
+
+	echo "$ZRAM_COMP" > /sys/block/zram0/comp_algorithm 2>/dev/null
+	if ! echo "$ZRAM_DISKSIZE" > /sys/block/zram0/disksize
+	then
+		echo "FAIL (disksize)"
+		return 1
+	fi
+	# mem_limit is write-only in sysfs: reading it back gives nothing, which
+	# looks identical to it not being set. Field 4 of mm_stat is the real
+	# answer if you need to confirm it took.
+	echo "$ZRAM_MEM_LIMIT" > /sys/block/zram0/mem_limit 2>/dev/null
+
+	mkswap /dev/zram0 > /dev/null 2>&1
+	if ! swapon /dev/zram0
+	then
+		echo "FAIL (swapon)"
+		return 1
+	fi
+
+	echo "OK ($ZRAM_DISKSIZE, limit $ZRAM_MEM_LIMIT)"
+}
+
+stop() {
+	if grep -q '^/dev/zram0 ' /proc/swaps
+	then
+		printf "zram: "
+		swapoff /dev/zram0 && echo "OK" || echo "FAIL"
+	fi
+}
+
+case "$1" in
+	start)
+		start
+		;;
+	stop)
+		stop
+		;;
+	restart|reload)
+		stop
+		start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

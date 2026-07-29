@@ -17,10 +17,16 @@ IMG=${1:-/slotb.img}
 SIZE_MB=${2:-3072}
 MNT=/mnt/slotb
 
+# Free space must be measured where the image will live, not on /. Run from
+# slot A those are the same filesystem; run from a loop slot they are not, and
+# checking / would report the image's own free space instead of its host's.
+IMGDIR=$(dirname "$IMG")
+
 echo "===== pre-flight ====="
-avail_kb=$(df -k / | awk 'NR==2{print $4}')
-echo "  free on p2    : $((avail_kb / 1024)) MB"
-echo "  rootfs in use : $(df -k / | awk 'NR==2{print int($3/1024)}') MB"
+avail_kb=$(df -k "$IMGDIR" | awk 'NR==2{print $4}')
+echo "  target        : $IMG"
+echo "  host fs       : $(df -k "$IMGDIR" | awk 'NR==2{print $1}') with $((avail_kb / 1024)) MB free"
+echo "  rootfs in use : $(df -k / | awk 'NR==2{print int($3/1024)}') MB on $(df -k / | awk 'NR==2{print $1}')"
 [ "$avail_kb" -gt 2097152 ] || { echo "need at least 2G free on p2"; exit 1; }
 [ -e "$IMG" ] && { echo "$IMG already exists - refusing to clobber"; exit 1; }
 for c in rsync mkfs.ext4 losetup tune2fs; do
@@ -77,8 +83,14 @@ echo "===== unmount ====="
 sync
 umount "$MNT"
 losetup -d "$LOOP"
-echo "  image occupies $(du -sh "$IMG" | cut -f1), free on p2 now $(df -h / | awk 'NR==2{print $4}')"
+echo "  image occupies $(du -sh "$IMG" | cut -f1), $(df -h "$IMGDIR" | awk 'NR==2{print $4}') now free on $(df -h "$IMGDIR" | awk 'NR==2{print $1}')"
+
+# /init resolves loop: markers against the slot A filesystem root, so the marker
+# is the image path relative to that filesystem's mount point - which is "/" when
+# building from slot A and "/mnt/slota" when building from a loop slot.
+MP=$(df -k "$IMGDIR" | awk 'NR==2{print $NF}')
+if [ "$MP" = "/" ]; then MARKER=$IMG; else MARKER=${IMG#"$MP"}; fi
 
 echo
-echo "  Boot it with:  echo loop:$IMG > /boot/slot && reboot"
+echo "  Boot it with:  echo loop:$MARKER > /boot/slot && reboot"
 echo "  Undo with:     rm /boot/slot && reboot"

@@ -32,3 +32,9 @@ ssh root@<device> "setsid sh -c '/etc/init.d/S95nanokvm restart > /tmp/nanokvm.l
 session's stdout and the connection never closes. Worse, killing that ssh can
 take the server down with a SIGPIPE. `setsid` with the output redirected
 detaches it properly. `/tmp` is tmpfs, so the log costs no SD wear.
+
+The restart is not optional: `S95nanokvm` copies `/kvmapp/server` to
+`/tmp/server` and runs the copy, so replacing the file under `/kvmapp` changes
+nothing until the copy is remade. It also means `readlink /proc/<pid>/exe`
+reports `/tmp/server/NanoKVM-Server` — to confirm which build is running,
+compare sha256 rather than the path.

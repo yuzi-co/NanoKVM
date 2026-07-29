@@ -56,6 +56,26 @@ Verify with `cat /etc/slot` and `dmesg | grep nanokvm-slot`. Booting is not
 enough on its own: a stock initramfs would also boot, so check that the trace
 lines are present — their absence means the patch did not take.
 
+## Replacing a slot while running from it
+
+A live slot cannot be rebuilt in place: the loop device holds its backing file
+open. Build a second image alongside it instead, and switch the marker. The old
+image stays as a rollback that is one marker edit away, ahead of slot A.
+
+```shell
+# From the running loop slot. The image path is on the host filesystem;
+# the marker is relative to the slot A root, which the script prints for you.
+make-slot-image.sh /mnt/slota/slotb-<date>.img
+echo loop:/slotb-<date>.img > /boot/slot && reboot
+```
+
+Populating from a loop slot copies that slot, not slot A, so whatever the
+running system has — zram, a newer server binary — carries over. `rsync -x`
+stops at filesystem boundaries, and `/mnt/slota` is one, so slot A is not
+swept in. Stage anything new into the image while it is still mounted rather
+than into the running system: until the marker moves, a bad build has touched
+nothing that is currently booting.
+
 ## Swap
 
 A slot that boots from a loop image must not put its swap inside that image:

@@ -21,6 +21,10 @@ import (
 )
 
 func (s *Service) installRuntime() (string, *PicoclawError) {
+	if s == nil {
+		return "", newPicoclawError(CodeRuntimeUnavailable, "picoclaw service is unavailable")
+	}
+	s.ensureDependencies()
 	log.Debugf("picoclaw install: start, binary=%s, cache=%s", picoclawBinaryPath, picoclawCacheDir)
 
 	currentStatus := s.runtime.Get()
@@ -64,6 +68,7 @@ func (s *Service) installRuntime() (string, *PicoclawError) {
 }
 
 func (s *Service) runInstallRuntime(ctx context.Context, cancel context.CancelFunc) {
+	s.ensureDependencies()
 	defer cancel()
 
 	_ = os.RemoveAll(picoclawCacheDir)
@@ -241,6 +246,7 @@ func copyWithProgress(ctx context.Context, dst io.Writer, src io.Reader, total i
 }
 
 func (s *Service) setInstallProgress(stage string, progress int, lastError string) {
+	s.ensureDependencies()
 	if progress < 0 {
 		progress = 0
 	}
@@ -261,6 +267,7 @@ func (s *Service) setInstallProgress(stage string, progress int, lastError strin
 }
 
 func (s *Service) finishInstallFailure(status string, message string) {
+	s.ensureDependencies()
 	s.runtime.Set(RuntimeStatus{
 		Ready:           false,
 		Installed:       false,

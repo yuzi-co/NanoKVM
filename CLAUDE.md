@@ -182,3 +182,22 @@ that unwraps `response.data` and hard-reloads on a 401.
 
 Top-level, `server/`, `web/`, and `support/` READMEs each have `_ZH` and `_JA` variants. Keep them in
 step when changing the English original.
+
+Write the English source to ASD-STE100 (Simplified Technical English) where it fits. Those docs are
+translated, and STE exists to make a source text translate predictably, so the rules earn their keep
+here rather than being style for its own sake:
+
+- One word, one meaning. Pick a term and keep it — do not alternate between "image", "build" and
+  "artefact" for the same thing.
+- One instruction per sentence. Keep procedure sentences under 20 words, descriptive ones under 25.
+- Active voice, present tense, and a stated subject. "The updater rewrites `/kvmapp/version`", not
+  "`/kvmapp/version` gets rewritten".
+- Do not stack more than three nouns. "USB gadget serial number" is the limit; break longer chains
+  with a preposition.
+- Keep the articles and the relative pronouns. Dropping "the" or "that" saves nothing and costs the
+  translator.
+- Say the condition before the action: "If the marker is absent, the board boots slot A."
+
+Where it does not fit, do not force it. Commit messages explain reasoning and often need the longer
+form. Code comments explain why, which STE has no vocabulary for. Prose that argues a trade-off is
+clearer unconstrained than chopped into approved words.

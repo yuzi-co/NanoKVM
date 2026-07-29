@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -103,11 +104,24 @@ func DelAccount() error {
 	return nil
 }
 
-func getDefaultAccount() *Account {
-	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+// defaultPasswordHash is derived once. A device that has never had a password
+// set falls back to the default account on every login attempt, and bcrypt at
+// the default cost is a second of a 1GHz C906 - paid on the exact path someone
+// guessing passwords would be hammering, on top of the comparison itself.
+var defaultPasswordHash = sync.OnceValue(func() string {
+	hashed, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+	if err != nil {
+		// Only possible if the cost is out of range, which it is not.
+		log.Errorf("failed to hash the default password: %s", err)
+		return ""
+	}
 
+	return string(hashed)
+})
+
+func getDefaultAccount() *Account {
 	return &Account{
 		Username: "admin",
-		Password: string(hashedPassword),
+		Password: defaultPasswordHash(),
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	buildversion "NanoKVM-Server/common/version"
 	"NanoKVM-Server/config"
 
 	"github.com/gin-gonic/gin"
@@ -87,13 +88,17 @@ func getImageVersion() string {
 	return image
 }
 
+// applicationVersionFile is written by the updater. Tests point it elsewhere.
+var applicationVersionFile = "/kvmapp/version"
+
 func getApplicationVersion() string {
-	content, err := os.ReadFile("/kvmapp/version")
-	if err != nil {
-		return "1.0.0"
+	version := "1.0.0"
+
+	if content, err := os.ReadFile(applicationVersionFile); err == nil {
+		version = strings.ReplaceAll(string(content), "\n", "")
 	}
 
-	return strings.ReplaceAll(string(content), "\n", "")
+	return buildversion.Decorate(version)
 }
 
 func getDeviceKey() string {

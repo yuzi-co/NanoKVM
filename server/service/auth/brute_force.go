@@ -19,6 +19,10 @@ type loginAttempt struct {
 const (
 	maxLoginAttemptsRecords = 3000
 	cleanupInterval         = 6 * time.Hour
+
+	// staleRecordWindow is how long a record with no lockout on it is kept
+	// after its last failure.
+	staleRecordWindow = 30 * time.Minute
 )
 
 var (
@@ -40,11 +44,7 @@ func startCleanupRoutine() {
 			loginMutex.Lock()
 			now := time.Now()
 			for ip, attempt := range loginAttempts {
-				// Cleanup rules: if it has been locked and the lockout time has passed,
-				// or (although not locked) it has been 30 minutes since the last failure,
-				// remove this record
-				if (!attempt.lockoutEnd.IsZero() && now.After(attempt.lockoutEnd)) ||
-					(attempt.lockoutEnd.IsZero() && now.Sub(attempt.lastFailed) > 30*time.Minute) {
+				if isExpiredLocked(attempt, now) {
 					delete(loginAttempts, ip)
 				}
 			}
@@ -105,11 +105,15 @@ func RecordLoginFailure(clientIP string) (bool, int, string) {
 
 	attempt, exists := loginAttempts[clientIP]
 	if !exists {
-		// When the record pool is full, clear the records instead of global lockout to prevent DDoS
-		if len(loginAttempts) >= maxLoginAttemptsRecords {
-			log.Warn("Login attempt records reached maximum limit, clearing records to prevent memory overflow")
-			loginAttempts = make(map[string]*loginAttempt)
+		// Emptying the table here would hand every locked-out address a clean
+		// slate, so an attacker with a range to spend could stay ahead of the
+		// limit forever by flushing it. Reclaim one record instead, and pick
+		// the one worth the least.
+		if len(loginAttempts) >= maxLoginAttemptsRecords && !evictOneRecordLocked() {
+			log.Warn("login attempt records are full and every record is live; not tracking this address")
+			return false, 0, ""
 		}
+
 		attempt = &loginAttempt{}
 		loginAttempts[clientIP] = attempt
 	}
@@ -131,6 +135,76 @@ func RecordLoginFailure(clientIP string) (bool, int, string) {
 	}
 
 	return false, 0, ""
+}
+
+// evictOneRecordLocked frees a slot in the record table, reporting whether it
+// managed to. Records are given up in order of how little they are still worth:
+// ones that have expired, then ones that are merely counting failures, and a
+// live lockout only when there is nothing else left.
+func evictOneRecordLocked() bool {
+	now := time.Now()
+
+	var (
+		oldestUnlockedIP string
+		oldestUnlocked   time.Time
+
+		soonestLockoutIP string
+		soonestLockout   time.Time
+	)
+
+	// One pass, reclaiming every record that has expired rather than stopping
+	// at the first: the scan costs the same either way, and taking them all
+	// keeps the next few insertions from repeating it.
+	reclaimed := false
+
+	for ip, attempt := range loginAttempts {
+		if isExpiredLocked(attempt, now) {
+			delete(loginAttempts, ip)
+			reclaimed = true
+
+			continue
+		}
+
+		if attempt.lockoutEnd.IsZero() {
+			if oldestUnlockedIP == "" || attempt.lastFailed.Before(oldestUnlocked) {
+				oldestUnlockedIP = ip
+				oldestUnlocked = attempt.lastFailed
+			}
+
+			continue
+		}
+
+		if soonestLockoutIP == "" || attempt.lockoutEnd.Before(soonestLockout) {
+			soonestLockoutIP = ip
+			soonestLockout = attempt.lockoutEnd
+		}
+	}
+
+	if reclaimed {
+		return true
+	}
+
+	if oldestUnlockedIP != "" {
+		delete(loginAttempts, oldestUnlockedIP)
+		return true
+	}
+
+	if soonestLockoutIP != "" {
+		delete(loginAttempts, soonestLockoutIP)
+		return true
+	}
+
+	return false
+}
+
+// isExpiredLocked reports whether a record has outlived its usefulness: either
+// its lockout has run out, or it never had one and has gone quiet.
+func isExpiredLocked(attempt *loginAttempt, now time.Time) bool {
+	if !attempt.lockoutEnd.IsZero() {
+		return now.After(attempt.lockoutEnd)
+	}
+
+	return now.Sub(attempt.lastFailed) > staleRecordWindow
 }
 
 // ClearLoginAttempt clears the failed login attempt record for an IP upon successful login.

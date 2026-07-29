@@ -5,8 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 Firmware and application source for NanoKVM Cube/Lite/PCIe — an IP-KVM built on the Sipeed
-LicheeRV Nano (SG2002, single RISC-V C906 core, 256MB DDR3 of which ~158MB is reserved for the
-multimedia/capture subsystem). Four deliverables live here:
+LicheeRV Nano (SG2002, single RISC-V C906 core, 256MB DDR3). About 99MB of that is reserved before
+Linux starts — a 75MB fixed ION carveout for the video pipeline (22MB of which belongs to the RTOS
+core), plus the kernel image and firmware regions — leaving ~158MB of usable RAM. The carveout is
+sized at build time by the board's `memmap.py` and is not CMA, so none of it comes back when the
+capture path is idle. Four deliverables live here:
 
 | Path             | What it is                                                                 |
 | ---------------- | -------------------------------------------------------------------------- |
@@ -50,8 +53,27 @@ make clean
 ```
 
 The Makefile targets shell out to `id -u` and refuse to run as root — they need Docker and a
-POSIX shell (Git Bash/WSL on Windows, not PowerShell). `server/build.sh` is the same build for a
-host that already has the toolchain and `patchelf` on PATH.
+POSIX shell (Git Bash/WSL on Windows, not PowerShell). They also use `docker run -it`, so they need
+a TTY and cannot be driven from a non-interactive tool call. `server/build.sh` is the same build for
+a host that already has the toolchain and `patchelf` on PATH; it is also the only one of the two
+that patches the RPATH, so after `make app` that step still has to be done by hand:
+
+```shell
+docker run --rm -v "$PWD/server:/src" -w /src ubuntu:24.04 \
+  sh -c 'apt-get update -qq && apt-get install -y -qq patchelf \
+         && patchelf --add-rpath "\$ORIGIN/dl_lib" NanoKVM-Server'
+```
+
+Both build paths stamp the binary. `common/version.Build` is set through `-ldflags -X` to
+`dev.<date>.<sha>[.dirty]`, computed on the host because the builder container only sees the
+checkout, not `.git`. `Decorate` attaches it to the reported application version as semver *build
+metadata* (`2.4.3+dev.20260729.1023.0414ec9`), so `Settings > Update` — which compares versions with
+`semver.gte` — still orders it correctly against the release feed. A prerelease suffix would sort
+below the release it was built from and leave that page advertising an upgrade forever. Pass
+`BUILD_STAMP=` to build unstamped the way a release does, or `BUILD_STAMP=<value>` to override.
+
+The stamp is the only way to tell which server binary is running: the application version itself
+lives in `/kvmapp/version` and is rewritten by the updater, not by deploying a binary.
 
 For anything that does not need the real capture bindings, use the `novision` build tag — it swaps
 `common/kvm_vision.go` for a pure-Go stub so the tree can be type-checked and tested off-device:
@@ -113,9 +135,16 @@ Setting `authentication: disable` in the config turns on permissive CORS in `mai
 local frontend development only.
 
 **The cgo boundary** is `common/kvm_vision.go` (`//go:build !novision`), which `#cgo`-links `-lkvm`
-from `server/dl_lib`. That library is built from `support/sg2002` and is not checked in. The
-executable's RPATH is patched to `$ORIGIN/dl_lib` after linking — a build that skips `patchelf` will
-not start on the device.
+from `server/dl_lib`. Prebuilt `.so` files (including `libkvm.so`) are committed there, so the
+cross-compile needs nothing extra; rebuilding them from `support/sg2002` is only necessary when
+changing `kvm_vision`. The executable's RPATH must be patched to `$ORIGIN/dl_lib` after linking —
+a build that skips `patchelf` will not start on the device, and `make app` does not run it.
+
+Linking prints `libopencv_video.so.409, needed by dl_lib/libkvm.so, not found (try using -rpath or
+-rpath-link)`. This is expected: `libkvm.so` links against five OpenCV libraries, and only four of
+them ship in `dl_lib` — `libopencv_video.so.409` lives in the device rootfs at `/usr/lib`, which the
+cross-linker has no view of. The warning does not affect the output; the executable records only
+`libkvm.so` and `libc.so` as its own `NEEDED` entries.
 
 **Video has three delivery paths**, all under `service/stream/`: `mjpeg`, `webrtc` (H.264 over
 WebRTC, with STUN/TURN configured in `server.yaml`), and `direct` (H.264 over plain HTTP). Capture is

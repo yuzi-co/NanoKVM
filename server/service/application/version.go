@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	buildversion "NanoKVM-Server/common/version"
 	"NanoKVM-Server/proto"
 	"NanoKVM-Server/utils"
 
@@ -42,16 +43,25 @@ var (
 	versionPattern     = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
 )
 
+// versionFile is written by the updater. Tests point it elsewhere.
+var versionFile = fmt.Sprintf("%s/version", AppDir)
+
+// currentVersion reports the installed application version, carrying the stamp
+// of the binary serving it.
+func currentVersion() string {
+	version := "1.0.0"
+
+	if content, err := os.ReadFile(versionFile); err == nil {
+		version = strings.ReplaceAll(string(content), "\n", "")
+	}
+
+	return buildversion.Decorate(version)
+}
+
 func (s *Service) GetVersion(c *gin.Context) {
 	var rsp proto.Response
 
-	// current version
-	currentVersion := "1.0.0"
-
-	versionFile := fmt.Sprintf("%s/version", AppDir)
-	if version, err := os.ReadFile(versionFile); err == nil {
-		currentVersion = strings.ReplaceAll(string(version), "\n", "")
-	}
+	currentVersion := currentVersion()
 
 	log.Debugf("current version: %s", currentVersion)
 

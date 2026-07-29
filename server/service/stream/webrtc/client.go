@@ -2,15 +2,14 @@ package webrtc
 
 import (
 	"encoding/json"
-	"errors"
+	"sync"
+
+	"NanoKVM-Server/service/stream"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
-	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 	log "github.com/sirupsen/logrus"
-
-	"sync"
 )
 
 func NewClient(ws *websocket.Conn, videoConn *webrtc.PeerConnection) *Client {
@@ -18,6 +17,67 @@ func NewClient(ws *websocket.Conn, videoConn *webrtc.PeerConnection) *Client {
 		ws:    ws,
 		video: videoConn,
 		mutex: sync.Mutex{},
+		slot:  stream.NewFrameSlot[[]*rtp.Packet](),
+		done:  make(chan struct{}),
+	}
+}
+
+// enqueue offers a frame to this client and never blocks.
+//
+// A client that has not drained the previous frame is behind, and an H.264
+// stream with a hole in it stays broken until the next keyframe, so the frame
+// is dropped and everything after it skipped until one arrives.
+func (c *Client) enqueue(packets []*rtp.Packet, isKeyFrame bool) {
+	if c.waitingForKeyFrame && !isKeyFrame {
+		return
+	}
+
+	if !c.slot.TryPut(packets) {
+		c.waitingForKeyFrame = true
+		return
+	}
+
+	c.waitingForKeyFrame = false
+}
+
+// write drains the slot until it is closed or the connection fails. It is the
+// only goroutine that writes to this client's track, so the capture loop never
+// waits on a viewer.
+func (c *Client) write() {
+	defer close(c.done)
+
+	for {
+		packets, ok := c.slot.Take()
+		if !ok {
+			return
+		}
+
+		c.mutex.Lock()
+		track := c.track
+		c.mutex.Unlock()
+
+		if track == nil {
+			continue
+		}
+
+		if err := track.writePackets(packets); err != nil {
+			log.Debugf("h264 write to %s failed: %s", c.ws.RemoteAddr(), err)
+
+			// Unblock the reader so the handler tears this client down.
+			c.Close()
+
+			return
+		}
+	}
+}
+
+// stop releases the writer and waits for it to let go of the connection.
+func (c *Client) stop() {
+	c.slot.Close()
+	<-c.done
+
+	if dropped := c.slot.Dropped(); dropped > 0 {
+		log.Debugf("h264 client dropped %d frames", dropped)
 	}
 }
 
@@ -81,20 +141,6 @@ func (c *Client) AddTrack() error {
 		return err
 	}
 
-	videoPacketizer := rtp.NewPacketizer(
-		1200,
-		100,
-		0x1234ABCD,
-		&codecs.H264Payloader{},
-		rtp.NewRandomSequencer(),
-		90000,
-	)
-	if videoPacketizer == nil {
-		err := errors.New("failed to create rtp packetizer")
-		log.Error(err)
-		return err
-	}
-
 	videoSender, err := c.video.AddTrack(videoTrack)
 	if err != nil {
 		log.Errorf("failed to add video track: %s", err)
@@ -102,14 +148,8 @@ func (c *Client) AddTrack() error {
 	}
 	go startRTCPReader(videoSender)
 
-	track := &Track{
-		videoPacketizer: videoPacketizer,
-		video:           videoTrack,
-	}
-	track.updateExtension()
-
 	c.mutex.Lock()
-	c.track = track
+	c.track = &Track{video: videoTrack}
 	c.mutex.Unlock()
 
 	return nil

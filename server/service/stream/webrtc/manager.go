@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/rtp"
+	"github.com/pion/rtp/codecs"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -16,10 +17,32 @@ import (
 // switching between stream types is briefly counted on both.
 const viewerSource = "webrtc"
 
+const (
+	// rtpMTU keeps a packet inside a normal path MTU once the RTP, UDP and IP
+	// headers are added.
+	rtpMTU = 1200
+
+	// videoPayloadType and videoSSRC are placeholders: pion rewrites both per
+	// binding from what the peer negotiated.
+	videoPayloadType = 100
+	videoSSRC        = 0x1234ABCD
+
+	// clockRate is the RTP clock for H.264.
+	clockRate = 90000
+)
+
 func NewWebRTCManager() *WebRTCManager {
 	m := &WebRTCManager{
 		clients:      make(map[*websocket.Conn]*Client),
 		videoSending: 0,
+		videoPacketizer: rtp.NewPacketizer(
+			rtpMTU,
+			videoPayloadType,
+			videoSSRC,
+			&codecs.H264Payloader{},
+			rtp.NewRandomSequencer(),
+			clockRate,
+		),
 	}
 	m.updateClientSnapshotLocked()
 
@@ -27,7 +50,7 @@ func NewWebRTCManager() *WebRTCManager {
 }
 
 func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
-	client.track.updateExtension()
+	go client.write()
 
 	m.mutex.Lock()
 	m.clients[ws] = client
@@ -43,6 +66,7 @@ func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
 
 func (m *WebRTCManager) RemoveClient(ws *websocket.Conn) {
 	m.mutex.Lock()
+	client, exists := m.clients[ws]
 	delete(m.clients, ws)
 	count := m.updateClientSnapshotLocked()
 	m.mutex.Unlock()
@@ -50,6 +74,10 @@ func (m *WebRTCManager) RemoveClient(ws *websocket.Conn) {
 	// Outside the lock: resuming capture is slow, and this lock is on the
 	// path that hands frames to every other viewer.
 	vm.SetViewerCount(viewerSource, count)
+
+	if exists {
+		client.stop()
+	}
 
 	log.Debugf("removed client %s, total clients: %d", ws.RemoteAddr(), count)
 }
@@ -113,17 +141,18 @@ func (m *WebRTCManager) sendVideoStream() {
 			continue
 		}
 
-		sample := media.Sample{
-			Data:     data,
-			Duration: duration,
-		}
+		// Packetized once for everyone. Cutting the same frame up again for
+		// each viewer copies the whole payload per client, which is real work
+		// on a board with one core and no memory to spare.
+		samples := uint32(duration.Seconds() * clockRate)
+		packets := m.videoPacketizer.Packetize(data, samples)
 
+		isKeyFrame := result == 3
+
+		// Handing the frame over never blocks: a client that is behind drops
+		// it and waits for the next keyframe.
 		for _, client := range clients {
-			if err := client.track.writeVideoSample(sample); err != nil {
-				log.Errorf("failed to write h264 video to client: %s", err)
-				m.RemoveClient(client.WsConn())
-				client.Close()
-			}
+			client.enqueue(packets, isKeyFrame)
 		}
 
 		if values.FPS != fps && values.FPS != 0 {

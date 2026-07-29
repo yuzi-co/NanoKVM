@@ -116,8 +116,8 @@ func (s *SignalingHandler) updateHeaderExtensionID() error {
 	}
 
 	for _, ext := range params.HeaderExtensions {
-		if ext.URI == "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay" {
-			s.client.track.playoutDelayExtensionID = uint8(ext.ID)
+		if ext.URI == playoutDelayExtensionURI {
+			s.client.track.setPlayoutDelayExtensionID(uint8(ext.ID))
 			log.Debugf("found and set playout delay extension ID to: %d", ext.ID)
 			return nil
 		}

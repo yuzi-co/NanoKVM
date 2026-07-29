@@ -158,7 +158,7 @@ func createMediaEngine() (*webrtc.MediaEngine, error) {
 	}
 
 	if err := mediaEngine.RegisterHeaderExtension(
-		webrtc.RTPHeaderExtensionCapability{URI: "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"},
+		webrtc.RTPHeaderExtensionCapability{URI: playoutDelayExtensionURI},
 		webrtc.RTPCodecTypeVideo,
 	); err != nil {
 		log.Errorf("failed to register header extension: %s", err)

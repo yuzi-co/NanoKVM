@@ -17,8 +17,22 @@ DOCKER_RUN_BASE := docker run -e UID=$(UID) -e GID=$(GID) -v $(PWD):/home/build/
 # to recursively rewrite the MaixCDK home directory at container startup.
 DOCKER_BUILD_ARGS := --build-arg DOCKER_UID=$(UID) --build-arg DOCKER_GID=$(GID)
 
+# Build stamp. The application version lives in /kvmapp/version and is written
+# by the updater, so it does not change when a binary is deployed by hand. This
+# is linked into the binary and reported as semver build metadata, which makes a
+# hand-built server identifiable without affecting version comparison.
+#
+# Computed on the host: the container sees only the checkout, not .git. Override
+# with `make app BUILD_STAMP=whatever`, or `make app BUILD_STAMP=` to build
+# unstamped the way a release does.
+GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null)
+GIT_DIRTY := $(shell git status --porcelain 2>/dev/null | head -n 1)
+BUILD_DATE := $(shell date +%Y%m%d.%H%M)
+BUILD_STAMP ?= dev.$(BUILD_DATE)$(if $(GIT_SHA),.$(GIT_SHA))$(if $(GIT_DIRTY),.dirty)
+GO_LDFLAGS := $(if $(BUILD_STAMP),-ldflags "-X NanoKVM-Server/common/version.Build=$(BUILD_STAMP)")
+
 # Build commands
-GO_BUILD_CMD := cd /home/build/NanoKVM/server && go mod tidy && CGO_ENABLED=1 GOOS=linux GOARCH=riscv64 CC=riscv64-unknown-linux-musl-gcc CGO_CFLAGS="-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d" go build
+GO_BUILD_CMD := cd /home/build/NanoKVM/server && go mod tidy && CGO_ENABLED=1 GOOS=linux GOARCH=riscv64 CC=riscv64-unknown-linux-musl-gcc CGO_CFLAGS="-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d" go build $(GO_LDFLAGS)
 SUPPORT_BUILD_CMD := . ./home/build/MaixCDK/bin/activate && cd /home/build/NanoKVM/support/sg2002 && ./build kvm_system && ./build kvm_system add_to_kvmapp
 VISION_BUILD_CMD := . ./home/build/MaixCDK/bin/activate && cd /home/build/NanoKVM/support/sg2002 && ./build kvm_vision && ./build kvm_vision add_to_kvmapp
 RELEASE_BUILD_CMD := /home/build/NanoKVM/scripts/build-in-container.sh
@@ -91,7 +105,7 @@ shell: check-root builder-image
 
 # Build Go application
 app: check-root builder-image
-	@echo "Building app..."
+	@echo "Building app... (build stamp: $(if $(BUILD_STAMP),$(BUILD_STAMP),none))"
 	@$(DOCKER_RUN_BASE) $(DOCKER_TTY) $(IMAGE_NAME) /bin/bash -c '$(GO_BUILD_CMD)'
 
 # Build hardware support libraries

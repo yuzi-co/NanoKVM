@@ -45,7 +45,32 @@ export GOEXPERIMENT=boringcrypto
 export CC="$CC_COMPILER"
 export CGO_CFLAGS="$CGO_CFLAGS_OPTS"
 
-go build -o "$BINARY_NAME" -v
+# Build stamp. The application version lives in /kvmapp/version and is written
+# by the updater, so it does not change when a binary is deployed by hand. This
+# is linked in and reported as semver build metadata, which identifies a
+# hand-built server without affecting version comparison.
+#
+# Set BUILD_STAMP to override, or BUILD_STAMP= to build unstamped like a
+# release does.
+if [ -z "${BUILD_STAMP+set}" ]; then
+    BUILD_STAMP="dev.$(date +%Y%m%d.%H%M)"
+
+    if git_sha=$(git rev-parse --short HEAD 2>/dev/null); then
+        BUILD_STAMP="$BUILD_STAMP.$git_sha"
+
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+            BUILD_STAMP="$BUILD_STAMP.dirty"
+        fi
+    fi
+fi
+
+echo -e "${YELLOW}[INFO] Build stamp: ${BUILD_STAMP:-none}${NC}"
+
+if [ -n "$BUILD_STAMP" ]; then
+    go build -ldflags "-X NanoKVM-Server/common/version.Build=$BUILD_STAMP" -o "$BINARY_NAME" -v
+else
+    go build -o "$BINARY_NAME" -v
+fi
 
 if [ -f "$BINARY_NAME" ]; then
     echo -e "${GREEN}[SUCCESS] Binary '$BINARY_NAME' created successfully.${NC}"

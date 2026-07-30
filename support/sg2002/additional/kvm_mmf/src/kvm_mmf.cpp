@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/param.h>
+#include <pthread.h>
 #include "math.h"
 #include <inttypes.h>
 
@@ -1283,28 +1284,56 @@ static CVI_S32 _mmf_vpss_init_new(VPSS_GRP VpssGrp, CVI_U32 width, CVI_U32 heigh
 	return s32Ret;
 }
 
+// vi_lock serialises the pair below. priv.vi_is_inited is read and then written
+// without any lock, and more than one thread reaches these functions: the
+// capture path, the HDMI event path that sets reopen_cam_flag, and whatever
+// asks for a resolution change. A check-then-act on a shared bool is not safe
+// between them.
+static pthread_mutex_t vi_lock = PTHREAD_MUTEX_INITIALIZER;
+
 int mmf_vi_init(void)
 {
+	pthread_mutex_lock(&vi_lock);
+
 	if (priv.vi_is_inited) {
+		pthread_mutex_unlock(&vi_lock);
 		return 0;
 	}
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	s32Ret = _mmf_vpss_init_new(0, priv.vi_size.u32Width, priv.vi_size.u32Height, PIXEL_FORMAT_UYVY);		// PIXEL_FORMAT_UYVY  PIXEL_FORMAT_NV21
 	if (s32Ret != CVI_SUCCESS) {
+		// Do not claim the pipeline is up. This used to fall through and set
+		// vi_is_inited anyway, which is how the kernel came to print both of
+		// these in one boot:
+		//
+		//   base_mod_jobs_init: mod(VI) job init fail, already inited
+		//   base_mod_jobs_exit: mod(VI) job exit fail, not inited yet
+		//
+		// The first is this failure. The second arrives later, when a deinit
+		// trusts the flag and tears down a group that was never created. One
+		// failed init is enough to produce both, which is why it appears on a
+		// boot where the RTOS handshake or a dmabuf allocation went wrong and
+		// not on the next one.
 		SAMPLE_PRT("_mmf_vpss_init_new failed. s32Ret: 0x%x !\n", s32Ret);
 		priv.vi_is_inited = false;
+		pthread_mutex_unlock(&vi_lock);
 		return s32Ret;
 	}
 
 	priv.vi_is_inited = true;
+
+	pthread_mutex_unlock(&vi_lock);
 
 	return s32Ret;
 }
 
 int mmf_vi_deinit(void)
 {
+	pthread_mutex_lock(&vi_lock);
+
 	if (!priv.vi_is_inited) {
+		pthread_mutex_unlock(&vi_lock);
 		return 0;
 	}
 
@@ -1313,10 +1342,13 @@ int mmf_vi_deinit(void)
 	s32Ret = _mmf_vpss_deinit_new(0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("_mmf_vpss_deinit_new failed with %#x!\n", s32Ret);
+		pthread_mutex_unlock(&vi_lock);
 		return CVI_FAILURE;
 	}
 
 	priv.vi_is_inited = false;
+
+	pthread_mutex_unlock(&vi_lock);
 
 	return s32Ret;
 }

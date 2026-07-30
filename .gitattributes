@@ -20,14 +20,35 @@ kvmapp/picoclaw/**/*.sh     text eol=lf
 kvmapp/picoclaw/**/*.md     text eol=lf
 kvmapp/picoclaw/**/*.yaml   text eol=lf
 tools/**/*.sh               text eol=lf
-# Device scripts are named for their boot order, so most of them have no
-# extension. Cover the directory rather than a list that the next script is
-# added outside of.
+# Device init scripts are named for their boot order and so have no extension.
+# Match the naming convention rather than a directory: the first attempt here
+# matched tools/slots/device/ and missed tools/oled/S97oled-nudge the same day.
+# tools/test-line-endings.sh fails if anything slips through again.
+tools/**/S[0-9][0-9]*       text eol=lf
 tools/slots/device/*        text eol=lf
-tools/zram/S01zram          text eol=lf
 tools/slots/*.inc           text eol=lf
 tools/slots/*.its.in        text eol=lf
 *.sh                        text eol=lf
+
+# The builder image entry point. Docker execs it directly, and with CRLF the
+# kernel looks for "/bin/sh\r" and the container dies with "exec /entrypoint: no
+# such file or directory".
+docker/entrypoint           text eol=lf
+
+# Embedded into the server binary with //go:embed and written to
+# /usr/share/udhcpc/default.script.d/ on the device, where busybox execs it on
+# every DHCP event. A CRLF copy is a hook that can never run, and nothing about
+# the failure would point at line endings.
+server/service/network/scripts/*  text eol=lf
+
+*.py                        text eol=lf
+
+# The MaixCDK build entry point. It never reaches the device, but it is a script
+# a shell has to execute: with CRLF the kernel execs "/bin/bash\r" and reports
+# 127, which is how the builder image stopped building. The C and C++ sources
+# beside it are deliberately left alone - upstream committed those with CRLF and
+# renormalising them would rewrite files this repository does not own.
+support/*/build             text eol=lf
 
 # Device payloads that must stay byte-exact.
 *.ko                        binary

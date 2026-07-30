@@ -109,10 +109,9 @@ func (k *KvmVision) SetHDMI(enable bool) int {
 		hdmiEnable = C.uint8_t(1)
 	}
 
-	result := int(C.kvmv_hdmi_control(hdmiEnable))
+	result := hdmiControlResult(int(C.kvmv_hdmi_control(hdmiEnable)))
 	if result < 0 {
-		log.Errorf("failed to set hdmi to %t", enable)
-		return result
+		log.Errorf("failed to set hdmi to %t: the library declined, which is what alpha and beta boards always do", enable)
 	}
 
 	return result

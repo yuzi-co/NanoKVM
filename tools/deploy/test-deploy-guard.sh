@@ -15,9 +15,11 @@ trap 'rm -rf "$WORK"' EXIT
 sed -n '/^# --- verdict ---$/,/^# --- end verdict ---$/p'   "$DG" > "$WORK/verdict.sh"
 sed -n '/^# --- snapshot ---$/,/^# --- end snapshot ---$/p' "$DG" > "$WORK/snapshot.sh"
 sed -n '/^# --- preflight ---$/,/^# --- end preflight ---$/p' "$DG" > "$WORK/preflight.sh"
+sed -n '/^# --- settle ---$/,/^# --- end settle ---$/p' "$DG" > "$WORK/settle.sh"
 [ -s "$WORK/verdict.sh" ]  || { echo "could not extract the verdict block"; exit 1; }
 [ -s "$WORK/snapshot.sh" ] || { echo "could not extract the snapshot block"; exit 1; }
 [ -s "$WORK/preflight.sh" ] || { echo "could not extract the preflight block"; exit 1; }
+[ -s "$WORK/settle.sh" ] || { echo "could not extract the settle block"; exit 1; }
 
 fails=0
 note() { printf '  %-62s %s\n' "$1" "$2"; [ "$2" = FAIL ] && fails=$((fails + 1)); return 0; }
@@ -118,6 +120,58 @@ pre_case "tmpfs cannot hold the copy S95nanokvm makes" yes 20000 refuse
 # a measured number rather than a guess. NEEDED is 24000, so the line is 36000.
 pre_case "exactly at the 1.5x boundary"             yes 36000 proceed
 pre_case "one kB under the boundary"                yes 35999 refuse
+
+echo
+echo
+echo "===== waiting for the restart, not for any answer ====="
+# The bug this replaced: the guard called wait_for_service, which returned true
+# the moment ANY server answered - and right after `restart` the one answering is
+# still the old process, because the restart is detached and has not killed it
+# yet. The verdict was then taken against a /tmp copy that had not been replaced,
+# so it read "serves, but not the binary just installed" and rolled back a good
+# build. Measured on a device: installed and FAILED were stamped the same second.
+#
+# So the wait has to be for the state the guard actually wants, and it has to
+# keep asking until the deadline instead of judging once.
+settle_case() {
+    desc="$1"; script="$2"; want="$3"
+    got=$(WORK="$WORK" SCRIPT="$script" sh -c '
+        eval "$SCRIPT"
+        . "$WORK/settle.sh"
+        settled_within 5 && echo keep || echo restore
+    ')
+    [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
+}
+
+# The old process answers immediately and the new binary is not running yet.
+# Giving up here is exactly the bug.
+settle_case "old server still answering, restart not landed yet"     'n=0; serving() { return 0; }; running_matches_installed() { return 1; }' restore
+
+# The normal case: the restart lands a second or two in. The guard must wait for
+# it rather than judge on the first look.
+settle_case "restart lands after a moment"     'n=0; serving() { return 0; }; running_matches_installed() { n=$((n+1)); [ "$n" -ge 3 ]; }' keep
+
+settle_case "healthy straight away"     'serving() { return 0; }; running_matches_installed() { return 0; }' keep
+
+# A candidate that cannot start never serves, and the guard must still give up
+# rather than hang.
+settle_case "candidate never serves"     'serving() { return 1; }; running_matches_installed() { return 1; }' restore
+
+# A server that comes up slowly under SD contention must not be failed early.
+settle_case "slow start, answers on the third look"     'n=0; serving() { n=$((n+1)); [ "$n" -ge 3 ]; }; running_matches_installed() { return 0; }' keep
+
+echo
+echo "===== the rollback is judged the same way ====="
+# The same race, in reverse: right after restoring, the process still running is
+# the bad one, and `serving` alone would report "rolled back, serving again"
+# while the binary the guard just removed was still the one answering.
+# Both paths, counted rather than located: an assertion about how many lines
+# apart two statements sit breaks on the next edit and proves nothing anyway.
+calls=$(grep -c 'settled_within "\$DEPLOY_TIMEOUT"' "$DG")
+[ "$calls" = 2 ]     && note "both the deploy and the rollback wait for the restart to land" OK     || note "settled_within is called $calls time(s), want 2 (deploy and rollback)" FAIL
+
+# The racy helper must be gone, not merely bypassed on one path.
+grep -q 'wait_for_service' "$DG"     && note "wait_for_service is still present and can be reached again" FAIL     || note "the helper that judged on the first answer is gone" OK
 
 echo
 echo "===== the script still parses ====="

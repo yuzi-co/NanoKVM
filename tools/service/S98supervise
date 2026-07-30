@@ -1,0 +1,212 @@
+#!/bin/sh
+#
+# Restart NanoKVM-Server and kvm_system if they die. Install as
+# /etc/init.d/S98supervise, mode 755.
+#
+# Nothing else does. S95nanokvm starts both with `&`, and inittab respawns only
+# two gettys, so a segfault leaves the KVM unreachable over HTTP until a person
+# intervenes. On out-of-band management hardware that is the worst possible
+# failure: the box exists to answer when the machine it controls does not.
+#
+# This is deliberately additive. It never starts the services at boot - that is
+# still S95nanokvm's job - so if this script is wrong the worst it does is
+# nothing. It does not modify S95nanokvm either, because that runs at boot and
+# is not worth the risk for this.
+#
+# Telling a crash from a deliberate stop needs no new state. `S95nanokvm stop`
+# kills the process and then removes /tmp/server, so:
+#
+#   binary staged, no process   -> it died, restart it
+#   /tmp/server gone            -> someone stopped it, leave it alone
+#
+# Environment:
+#   SUPERVISE_INTERVAL   seconds between checks   (default 5)
+#   SUPERVISE_LOG        where events go          (default /data/supervise.log)
+
+INTERVAL=${SUPERVISE_INTERVAL:-5}
+LOG=${SUPERVISE_LOG:-/data/supervise.log}
+PIDFILE=/tmp/supervise.pid
+
+SERVER_BIN=${SERVER_BIN:-/tmp/server/NanoKVM-Server}
+SYSTEM_BIN=${SYSTEM_BIN:-/tmp/kvm_system/kvm_system}
+
+# /data survives a reboot, which matters: the reason a board restarted itself is
+# worth having after the fact, and /var/log is a symlink into tmpfs.
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+}
+
+# --- decide ---
+# binary_present and process_running are the two questions. The binary being
+# staged in /tmp is the operator's intent, because a deliberate stop removes it.
+#
+# The last case looks strange and is real: during `S95nanokvm restart` the old
+# process can still be dying after /tmp/server has been removed. Treating that
+# as a crash would race the restart and start a second server.
+action() {
+    if process_running; then
+        echo healthy
+        return
+    fi
+
+    if binary_present; then
+        echo restart
+    else
+        echo stopped
+    fi
+}
+# --- end decide ---
+
+# --- backoff ---
+# A binary that can never start must not be retried in a tight loop: this board
+# has one core and an SD card. It must also never be given up on, because it is
+# the thing you reach for when nothing else answers - so the delay grows to a cap
+# and stays there rather than stopping.
+first_delay() {
+    echo 5
+}
+
+next_delay() {
+    d=$(( $1 * 2 ))
+    [ "$d" -lt 5 ] && d=5
+    [ "$d" -gt 60 ] && d=60
+    echo "$d"
+}
+
+# delay_after_run picks the next delay from how long the service actually lasted.
+# A run that held up means the fault was transient, so start over; otherwise a
+# board that crashes once a day would creep to the cap and stay there, and the
+# next real crash would wait a minute for nothing.
+delay_after_run() {
+    ran=$1
+    current=$2
+
+    if [ "$ran" -ge 60 ]; then
+        first_delay
+    else
+        next_delay "$current"
+    fi
+}
+# --- end backoff ---
+
+binary_present() {
+    [ -x "$SERVER_BIN" ]
+}
+
+process_running() {
+    pidof NanoKVM-Server > /dev/null 2>&1
+}
+
+system_binary_present() {
+    [ -x "$SYSTEM_BIN" ]
+}
+
+system_running() {
+    pidof kvm_system > /dev/null 2>&1
+}
+
+watch_loop() {
+    delay=$(first_delay)
+    started=$(cut -d. -f1 /proc/uptime)
+
+    while :; do
+        sleep "$INTERVAL"
+
+        case "$(action)" in
+            healthy)
+                started=$(cut -d. -f1 /proc/uptime)
+                ;;
+            stopped)
+                : # someone asked for this
+                ;;
+            restart)
+                ran=$(( $(cut -d. -f1 /proc/uptime) - started ))
+                log "NanoKVM-Server is gone after ${ran}s, restarting in ${delay}s"
+                sleep "$delay"
+
+                # Check again: a restart in progress may have started it while
+                # this was waiting.
+                if [ "$(action)" = restart ]; then
+                    "$SERVER_BIN" < /dev/null > /dev/null 2>&1 &
+                    log "started $SERVER_BIN as pid $!"
+                fi
+
+                delay=$(delay_after_run "$ran" "$delay")
+                started=$(cut -d. -f1 /proc/uptime)
+                ;;
+        esac
+
+        # kvm_system drives the OLED and the hardware monitor. Losing it costs
+        # no availability, so it gets a plain restart with no backoff.
+        if ! system_running && system_binary_present; then
+            "$SYSTEM_BIN" < /dev/null > /dev/null 2>&1 &
+            log "kvm_system was gone, started it as pid $!"
+        fi
+    done
+}
+
+start() {
+    printf "supervise: "
+
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+
+    # setsid, not just redirected fds. Backgrounding the loop with its stdio on
+    # /dev/null looks sufficient and is not: measured over ssh, `start` printed
+    # its line and then held the session open until the client gave up. A new
+    # session detaches it properly. S95nanokvm's own restart needs the same
+    # treatment, and tools/build/README.md records why.
+    setsid "$0" __watch < /dev/null > /dev/null 2>&1 &
+    echo "$!" > "$PIDFILE"
+
+    log "supervisor started as pid $!, checking every ${INTERVAL}s"
+    echo "OK (pid $!, every ${INTERVAL}s)"
+}
+
+stop() {
+    printf "supervise: "
+
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        rm -f "$PIDFILE"
+        log "supervisor stopped"
+        echo "stopped"
+    else
+        echo "not running"
+    fi
+}
+
+case "$1" in
+    __watch)
+        # Internal: the detached loop re-enters here through setsid.
+        watch_loop
+        ;;
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|reload)
+        stop
+        start
+        ;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "supervisor : running (pid $(cat "$PIDFILE"))"
+        else
+            echo "supervisor : not running"
+        fi
+        echo "verdict    : $(action)"
+        echo "server     : $(process_running && echo up || echo down)"
+        echo "kvm_system : $(system_running && echo up || echo down)"
+        echo "recent     :"
+        tail -5 "$LOG" 2>/dev/null | sed 's/^/  /'
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac

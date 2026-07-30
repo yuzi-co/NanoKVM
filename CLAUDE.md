@@ -5,11 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 Firmware and application source for NanoKVM Cube/Lite/PCIe — an IP-KVM built on the Sipeed
-LicheeRV Nano (SG2002, single RISC-V C906 core, 256MB DDR3). About 99MB of that is reserved before
-Linux starts — a 75MB fixed ION carveout for the video pipeline (22MB of which belongs to the RTOS
-core), plus the kernel image and firmware regions — leaving ~158MB of usable RAM. The carveout is
-sized at build time by the board's `memmap.py` and is not CMA, so none of it comes back when the
-capture path is idle. Four deliverables live here:
+LicheeRV Nano (SG2002, 256MB DDR3). The SG2002 has a C906B that runs Linux and a C906L intended for
+an RTOS; on this image the C906L runs nothing, so treat the board as single-core. About 96MB is
+reserved before Linux starts — a 75MB fixed ION carveout for the video pipeline, plus the kernel
+image and firmware regions — leaving ~158MB of usable RAM. The carveout is sized at build time by
+the board's `memmap.py` and is not CMA, so none of it comes back when the capture path is idle.
+
+The device tree reserves nothing for the RTOS core, and ION reports the whole 75MB as its own. See
+`tools/README.md` for what that carveout is measured to use, and for why the boot messages about
+the RTOS are expected rather than a fault. Four deliverables live here:
 
 | Path             | What it is                                                                 |
 | ---------------- | -------------------------------------------------------------------------- |

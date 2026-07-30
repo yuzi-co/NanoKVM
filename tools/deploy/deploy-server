@@ -71,15 +71,34 @@ serving() {
     return 1
 }
 
-wait_for_service() {
+# --- settle ---
+# settled_within waits for the restart to actually land.
+#
+# Waiting for "something answers" is not enough and was the bug that made this
+# block necessary. `restart` is detached, so for a second or two after it the
+# process still answering is the old one - and the verdict taken at that moment
+# reads "it serves, but /tmp/server is not what I installed", which is the exact
+# signature of a corrupt candidate. On a device the guard stamped `installed,
+# restarting` and `FAILED to serve` in the same second and rolled back a build
+# that was fine.
+#
+# So it waits for both conditions together, and keeps asking until the deadline
+# rather than judging once.
+settled_within() {
+    limit=$1
     waited=0
-    while [ "$waited" -lt "$DEPLOY_TIMEOUT" ]; do
-        serving && return 0
+
+    while [ "$waited" -lt "$limit" ]; do
+        if serving && running_matches_installed; then
+            return 0
+        fi
         waited=$((waited + 1))
         sleep 1
     done
+
     return 1
 }
+# --- end settle ---
 
 restart() {
     # S95nanokvm backgrounds the server with `&`, so it inherits this shell's
@@ -193,7 +212,7 @@ main() {
     say "deploy: installed, restarting"
     restart
 
-    if wait_for_service && [ "$(verdict)" = keep ]; then
+    if settled_within "$DEPLOY_TIMEOUT"; then
         say "deploy: OK, serving within ${DEPLOY_TIMEOUT}s and running what was installed"
         exit 0
     fi
@@ -214,7 +233,9 @@ main() {
     chmod 755 "$CURRENT"
     restart
 
-    if wait_for_service && restore_worked; then
+    # The same wait, for the same reason: for a moment after the restore the
+    # process still answering is the one that was just removed.
+    if settled_within "$DEPLOY_TIMEOUT" && restore_worked; then
         say "deploy: rolled back, serving again"
         exit 1
     fi

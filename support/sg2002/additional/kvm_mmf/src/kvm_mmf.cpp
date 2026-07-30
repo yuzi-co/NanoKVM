@@ -1312,9 +1312,13 @@ int mmf_vi_init(void)
 		//
 		// The first is this failure. The second arrives later, when a deinit
 		// trusts the flag and tears down a group that was never created. One
-		// failed init is enough to produce both, which is why it appears on a
-		// boot where the RTOS handshake or a dmabuf allocation went wrong and
-		// not on the next one.
+		// failed init is enough to produce both, which is why the pair appears
+		// on some boots and not others.
+		//
+		// An earlier version of this comment blamed the RTOS handshake. It
+		// cannot be the trigger: that handshake fails on every boot, because
+		// the image carries no C906L firmware for it to talk to, while this
+		// init fails only sometimes. What is upstream of it is still open.
 		SAMPLE_PRT("_mmf_vpss_init_new failed. s32Ret: 0x%x !\n", s32Ret);
 		priv.vi_is_inited = false;
 		pthread_mutex_unlock(&vi_lock);

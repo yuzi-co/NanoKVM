@@ -232,3 +232,62 @@ that avoids reaching that point carries the whole load:
 Keep a copy of the stock image before replacing it, and keep the fallback slot
 carrying these scripts - a revert that drops them lands on a board with no
 recovery at all.
+
+## The RTOS messages at boot are expected
+
+Every boot prints this at about 2.9 seconds:
+
+```
+name=1900000.rtos_cmdqu
+RTOS_CMDQU_SEND_WAIT timeout
+communicate with rtos fail
+```
+
+It reads like a fault and is not one. The SG2002 has two RISC-V cores: a C906B
+that runs Linux, and a C906L meant for an RTOS. This image carries no firmware
+for the C906L, so nothing answers the mailbox. The first-stage loader says so
+itself - `fip.bin` contains the string `No C906L image.`, next to the
+`blcp_2nd_runaddr` and `blcp_2nd_size` messages that belong to the same
+little-core payload slot.
+
+`soph_rtos_cmdqu.ko` probes anyway, sends one command, waits, and gives up after
+210ms. The only costs are that 210ms and the alarming wording.
+
+**Do not use it to explain an intermittent fault.** It fails on every boot, so it
+cannot account for anything that happens on some boots and not others - which is
+how it was wrongly blamed for the VI init failure in `kvm_mmf.cpp`.
+
+### What is actually reserved
+
+The device tree reserves nothing for the RTOS core. Checked on the board:
+
+| what | value |
+| --- | --- |
+| DRAM the kernel is given | `80000000-8fdfffff`, 254MB |
+| `reserved-memory/ion` size | `0x04b00000`, 75MB |
+| `mmode_resv0@80000000` | 256KB, the OpenSBI monitor |
+| any `rtos` reserved-memory node | none |
+| `MemTotal` | 158MB |
+
+So the 75MB carveout is not shared with a second operating system. It is all the
+video pipeline's, and ION accounts for the whole of it.
+
+### There is headroom in the carveout, and taking it is not safe yet
+
+`/sys/kernel/debug/ion/cvi_carveout_heap_dump/summary` after a day of use at
+1920x1080:
+
+```
+carveout heap size:78643200 bytes, used:41254912 bytes usage rate:53%,
+memory usage peak 52301824 bytes
+```
+
+Peak 50MB of 75MB. About 25MB has never been touched, and on a 158MB system that
+is worth having.
+
+Getting it means shrinking the ION size in the device tree, and the device tree
+lives in the boot image on the shared `/boot` partition - not in either A/B slot.
+A bad one takes out both slots at once, and this enclosure exposes no recovery
+control, so the only way back is the SD card in a reader. Measure a real peak
+first, across a reboot, a resolution change and every video mode, and treat the
+change as one that needs the case open if it goes wrong.

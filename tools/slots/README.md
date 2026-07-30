@@ -66,6 +66,12 @@ image stays as a rollback that is one marker edit away, ahead of slot A.
 # From the running loop slot. The image path is on the host filesystem;
 # the marker is relative to the slot A root, which the script prints for you.
 make-slot-image.sh /mnt/slota/slotb-<date>.img
+
+# Record the slot you are leaving. The watchdog reads this file, and the slot
+# you are on now is the one that is known to work.
+cp /boot/slot /boot/slot.good
+cp /boot/ver  /boot/ver.good
+
 echo loop:/slotb-<date>.img > /boot/slot && reboot
 ```
 
@@ -75,6 +81,116 @@ stops at filesystem boundaries, and `/mnt/slota` is one, so slot A is not
 swept in. Stage anything new into the image while it is still mounted rather
 than into the running system: until the marker moves, a bad build has touched
 nothing that is currently booting.
+
+## Watchdog
+
+The fallback in `/init` only catches a slot that will not mount. A slot that
+mounts and then starts no listener is worse: the board answers ping, and the
+marker that selects it is on a FAT partition that needs a shell to change. The
+card must come out.
+
+`device/S00awatchdog` removes that failure mode. Install it in the slot you are
+trying, not in the slot you trust:
+
+```shell
+cp tools/slots/device/S00awatchdog /etc/init.d/S00awatchdog   # inside the image
+chmod 755 /etc/init.d/S00awatchdog
+```
+
+The name sorts before `S00kmod`, so the watchdog arms before any other script
+can fail. It then waits up to 300 seconds for one question to become true: can
+this board be reached? Either door counts.
+
+| probe    | how                                           |
+| -------- | --------------------------------------------- |
+| network  | `eth0` has carrier and an IPv4 address         |
+| web      | `curl` gets 2xx, 3xx or 401 from loopback      |
+| ssh      | `pidof sshd`                                   |
+
+The rule is `network AND (web OR ssh)`. One door is enough, because one door is
+a way back in. A KVM that answers ssh but serves nothing is broken, and a person
+can repair it. Only the loss of both doors needs a reboot.
+
+Probe a listener, not a process. `pidof sshd` alone accepts a board whose server
+died, which is one of the two faults this script was written after.
+
+If no door opens, the watchdog restores `/boot/slot.good` and reboots. It never
+writes that file. Recording the *running* slot as the fallback sounds helpful and
+is not: after one healthy boot the fallback names the slot itself, and every
+later failure then lands on slot A however many good slots exist. The switch
+records the file, because the slot it replaces is the slot that was working.
+
+Two cases fall through to slot A, and both matter:
+
+- No `/boot/slot.good` exists. Nothing better is known.
+- `/boot/slot.good` names the slot that is failing now. A slot can boot, and
+  break later. To restore it onto itself would reboot the board for ever.
+
+Decisions go to `/watchdog.log` in the image, because `/var/log` is a symlink
+into tmpfs and a boot that never finishes leaves nothing there.
+
+Ask for the verdict by hand at any time:
+
+```shell
+/etc/init.d/S00awatchdog check          # reachable (web=up, ssh=up)
+```
+
+`test-watchdog.sh` extracts the decision logic from the script itself, so the
+test cannot drift from what ships. Run it on the board as well as on a
+workstation: busybox `ash` is not the shell the tests were written in.
+
+```shell
+sh tools/slots/test-watchdog.sh                       # against the repository copy
+sh /tmp/test-watchdog.sh /etc/init.d/S00awatchdog     # against what is installed
+```
+
+Remove the script once a slot is trusted, or leave it: a slot that is reachable
+pays only one `curl` to loopback, ten seconds after boot.
+
+## Instrumenting a boot that fails silently
+
+`rcS` reports nothing, and every service writes its log to tmpfs, so a boot that
+completes with no listeners leaves no evidence. Replace `rcS` in the image with a
+copy that records each script and its exit status to `/bootlog`:
+
+```sh
+echo "$(cut -d. -f1 /proc/uptime)s  start  $i" >> /bootlog; sync
+... run the script as before ...
+echo "$(cut -d. -f1 /proc/uptime)s  done   $i (rc=$?)" >> /bootlog; sync
+```
+
+The `sync` matters. Without it the log is lost with the page cache when the
+board is power-cycled, which is how a stalled board is usually ended.
+
+This is what turned a silent failure into two named faults: `S03usbdev` and
+`S95nanokvm` both exited 127, and `S50sshd` exited 0 having started nothing.
+
+## Fresh upstream rootfs: two traps
+
+A slot built from a released image is not the same as a slot copied from a
+running board. Two differences bite.
+
+**Copying identity over a factory rootfs never deletes.** `cp -a /etc/kvm/.` adds
+files and overwrites files. A file that the factory has and the running board
+does not will survive. Release 1.4.3 ships `/etc/kvm/ssh_stop`, which tells
+`S50sshd` to start nothing and exit 0. The result is a board with no ssh, and a
+script that reported success. Compare the two trees for files that exist only in
+the new one, and decide about each:
+
+```shell
+( cd /mnt/new && find etc -type f | sort ) > /tmp/new
+( cd /        && find etc -type f | sort ) > /tmp/run
+awk 'NR==FNR{a[$0];next} !($0 in a)' /tmp/run /tmp/new
+```
+
+**A first boot may reformat the SD card.** `S01fs` runs `mkfs.exfat` on
+`/dev/mmcblk0p3` when `/boot/usb.disk0` exists and `/etc/kvm.disk0` does not. A
+factory rootfs has no `/etc/kvm.disk0`. `/data` is `p3`. Create the marker in the
+image before the first boot:
+
+```shell
+touch /mnt/new/etc/kvm.disk0
+```
 
 ## Swap
 

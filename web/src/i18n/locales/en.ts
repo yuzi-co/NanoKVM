@@ -162,6 +162,10 @@ const en = {
       mode: 'Mouse mode',
       absolute: 'Absolute mode',
       relative: 'Relative mode',
+      absoluteStalled: 'The target is ignoring the absolute mouse',
+      absoluteStalledDesc:
+        'The target is not collecting absolute mouse reports, so pointer moves are lost. The keyboard is unaffected. Recovering USB often clears it; relative mode uses a different endpoint.',
+      useRelative: 'Switch to relative mode',
       direction: 'Wheel direction',
       scrollUp: 'Scroll up',
       scrollDown: 'Scroll down',

@@ -58,3 +58,8 @@ export function getLeaderKey() {
 export function setLeaderKey(key: string) {
   return http.post('/api/hid/shortcut/leader-key', { key });
 }
+
+// get per-endpoint HID delivery state
+export function getHidStatus() {
+  return http.get('/api/hid/status');
+}

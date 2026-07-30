@@ -64,6 +64,21 @@ func (s *Service) GetKeyboardLedStatus(c *gin.Context) {
 	})
 }
 
+// GetHidStatus reports what the target is doing with each HID endpoint.
+//
+// The web UI needs this because the interesting failure is invisible from every
+// other angle: the device node is present, the gadget is bound, and the target
+// is simply not fetching from one endpoint. Absolute mouse reports then vanish
+// while the keyboard keeps working, and the operator has no way to know that
+// relative mouse mode would work.
+func (s *Service) GetHidStatus(c *gin.Context) {
+	var rsp proto.Response
+
+	rsp.OkRspWithData(c, &proto.GetHidStatusRsp{
+		Devices: GetHid().Status(),
+	})
+}
+
 func (s *Service) SetHidMode(c *gin.Context) {
 	var req proto.SetHidModeReq
 	var rsp proto.Response

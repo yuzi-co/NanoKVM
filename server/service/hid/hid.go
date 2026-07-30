@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"NanoKVM-Server/proto"
+
 	log "github.com/sirupsen/logrus"
 )
 
@@ -25,6 +27,13 @@ type Hid struct {
 	kbMutex                sync.Mutex
 	mouseMutex             sync.Mutex
 	ledReaderStartOnce     sync.Once
+
+	// One health record per endpoint. They are separate because the failure
+	// this reports is per-endpoint: a target can fetch keyboard and relative
+	// mouse reports while ignoring the absolute mouse entirely.
+	kbHealth  endpointHealth
+	relHealth endpointHealth
+	absHealth endpointHealth
 }
 
 const (
@@ -48,9 +57,11 @@ type hidWriter interface {
 // device is built for every HID report, and a pair of closures would be two
 // heap allocations on the hottest path in the server.
 type hidDevice struct {
-	path string
-	mu   *sync.Mutex
-	file **os.File
+	path   string
+	name   string
+	mu     *sync.Mutex
+	file   **os.File
+	health *endpointHealth
 }
 
 func (d hidDevice) get() *os.File {
@@ -83,16 +94,41 @@ func (h *Hid) Unlock() {
 	h.mouseMutex.Unlock()
 }
 
+// The names are codes, not prose: the web UI translates them, and it needs a
+// stable key to translate.
+const (
+	NameKeyboard      = "keyboard"
+	NameRelativeMouse = "mouse-relative"
+	NameAbsoluteMouse = "mouse-absolute"
+)
+
 func (h *Hid) keyboardDevice(path string) hidDevice {
-	return hidDevice{path: path, mu: &h.kbMutex, file: &h.g0}
+	return hidDevice{path: path, name: NameKeyboard, mu: &h.kbMutex, file: &h.g0, health: &h.kbHealth}
 }
 
 func (h *Hid) relativeMouseDevice(path string) hidDevice {
-	return hidDevice{path: path, mu: &h.mouseMutex, file: &h.g1}
+	return hidDevice{path: path, name: NameRelativeMouse, mu: &h.mouseMutex, file: &h.g1, health: &h.relHealth}
 }
 
 func (h *Hid) absoluteMouseDevice(path string) hidDevice {
-	return hidDevice{path: path, mu: &h.mouseMutex, file: &h.g2}
+	return hidDevice{path: path, name: NameAbsoluteMouse, mu: &h.mouseMutex, file: &h.g2, health: &h.absHealth}
+}
+
+// Status reports what the target is doing with each endpoint. It takes none of
+// the HID locks, so a caller cannot delay a keystroke by asking.
+func (h *Hid) Status() []proto.HidDeviceStatus {
+	now := time.Now()
+
+	devices := h.devices()
+	statuses := make([]proto.HidDeviceStatus, 0, len(devices))
+	for _, device := range devices {
+		status := device.health.snapshot(now)
+		status.Name = device.name
+		status.Path = device.path
+		statuses = append(statuses, status)
+	}
+
+	return statuses
 }
 
 func (h *Hid) devices() []hidDevice {
@@ -302,19 +338,19 @@ func (h *Hid) Close() {
 
 func (h *Hid) WriteHid0(data []byte) {
 	if err := h.WriteKeyboardReport(data); err != nil {
-		log.Errorf("write to %s failed: %s", HID0, err)
+		reportWriteFailure("keyboard HID write failed", err)
 	}
 }
 
 func (h *Hid) WriteHid1(data []byte) {
 	if err := h.WriteRelativeMouseReport(data); err != nil {
-		log.Errorf("write to %s failed: %s", HID1, err)
+		reportWriteFailure("relative mouse HID write failed", err)
 	}
 }
 
 func (h *Hid) WriteHid2(data []byte) {
 	if err := h.WriteAbsoluteMouseReport(data); err != nil {
-		log.Errorf("write to %s failed: %s", HID2, err)
+		reportWriteFailure("absolute mouse HID write failed", err)
 	}
 }
 
@@ -341,16 +377,89 @@ func (h *Hid) WriteAbsoluteMouseReport(data []byte) error {
 
 func (h *Hid) writeHIDReport(device hidDevice, data []byte) bool {
 	if err := h.writeHID(device, data); err != nil {
-		log.Errorf("write to %s failed: %s", device.path, err)
+		reportWriteFailure("write to "+device.path+" failed", err)
 		return false
 	}
 	return true
+}
+
+// errRepeatedFailure marks a write failure that repeats one already reported for
+// the same endpoint. A stalled endpoint fails every report - about twenty a
+// second while the mouse moves - and each call site would otherwise print the
+// same line every time. Call sites pass their failures through
+// reportWriteFailure, which drops the repeats and keeps the first.
+var errRepeatedFailure = errors.New("repeated failure")
+
+// reportWriteFailure logs a failed HID operation unless the same endpoint has
+// already reported this failure. The context describes the operation, because
+// which write failed is worth knowing and the error alone does not say.
+func reportWriteFailure(context string, err error) {
+	if errors.Is(err, errRepeatedFailure) {
+		return
+	}
+
+	log.Errorf("%s: %s", context, err)
 }
 
 func (h *Hid) writeHID(device hidDevice, data []byte) error {
 	device.mu.Lock()
 	defer device.mu.Unlock()
 
+	return device.note(h.writeHIDLocked(device, data))
+}
+
+// note records what one write did to the endpoint and decides whether the
+// failure is worth reporting. It logs the two transitions no call site can see:
+// an endpoint that has stopped accepting reports, and one that has started
+// again.
+func (d hidDevice) note(err error) error {
+	transition := d.health.record(err, time.Now())
+
+	if err == nil {
+		if transition.Changed && transition.From != hidStateUnknown {
+			log.Infof("%s is accepting reports again", d.path)
+		}
+		return nil
+	}
+
+	if !transition.Changed {
+		return fmt.Errorf("%w: %w", errRepeatedFailure, err)
+	}
+
+	if transition.To == hidStateStalled {
+		// The failure that looks like nothing. The device node is present, the
+		// gadget is bound, and the target is simply not fetching from this
+		// endpoint - so every report to it is dropped while the others work.
+		//
+		// The message names the endpoint and stops there. Why a target stops
+		// collecting from one interface is not knowable from this side, and a
+		// guess printed as a fact would send the operator the wrong way.
+		log.Errorf("%s: the target is not fetching reports from this endpoint, so reports to it are lost. "+
+			"The other HID endpoints are unaffected. A USB reset, or a mouse mode that uses a different "+
+			"endpoint, may recover it", d.path)
+	}
+
+	return err
+}
+
+// writeReport puts one report on the wire. It is a variable so tests can drive
+// the outcomes writeHID has to react to: an endpoint the target is not fetching
+// from cannot be built out of an ordinary file, and a pipe stands in for it only
+// as long as the runtime keeps the descriptor pollable, which it does not
+// promise.
+var writeReport = func(path string, file *os.File, data []byte, timeout time.Duration) error {
+	// Two mechanisms for one deadline, because only one of them is available
+	// at a time. A pollable descriptor honours the deadline directly; one the
+	// runtime declined to poll returns EAGAIN instead, and writeWithTimeout
+	// bounds the retries.
+	if err := file.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		log.Debugf("set write deadline for %s failed: %s", path, err)
+	}
+
+	return writeWithTimeout(file, data, timeout)
+}
+
+func (h *Hid) writeHIDLocked(device hidDevice, data []byte) error {
 	// Drop a handle whose device node is gone before writing into it.
 	if file := device.get(); file != nil && hidFileWasDeleted(file) {
 		log.Debugf("%s was rebuilt underneath us, reopening", device.path)
@@ -373,15 +482,13 @@ func (h *Hid) writeHID(device hidDevice, data []byte) error {
 		return fmt.Errorf("%s: hid handle is nil", device.path)
 	}
 
-	deadline := time.Now().Add(hidWriteTimeout)
-	if err := file.SetWriteDeadline(deadline); err != nil {
-		log.Debugf("set write deadline for %s failed: %s", device.path, err)
-	}
-
-	if err := writeWithTimeout(file, data, hidWriteTimeout); err != nil {
+	if err := writeReport(device.path, file, data, hidWriteTimeout); err != nil {
+		// The LED reader shares the keyboard endpoint's descriptor, so a failed
+		// keyboard write invalidates it too. Drop it before the device handle.
 		if device.path == HID0 {
 			h.closeKeyboardLedReaderNoLock()
 		}
+
 		h.closeDeviceNoLock(device)
 		switch {
 		case errors.Is(err, os.ErrClosed):

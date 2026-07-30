@@ -1,0 +1,33 @@
+# Line endings for the files that run on the device.
+#
+# A CRLF in a device shell script is silent and total. busybox reads the
+# carriage return as part of the command name, so every line fails with
+# "not found" and the script exits 127. At boot that means a service never
+# starts, and the only symptom is a port that does not answer. Nothing is
+# logged that names the cause.
+#
+# core.autocrlf=true on a Windows checkout produces exactly that, so the rule
+# below pins the working-tree ending for these paths whatever the local setting
+# is. It deliberately does not cover the whole repository: `support/` carries
+# sources committed with CRLF, and renormalising them would rewrite files this
+# repository does not own.
+
+kvmapp/system/init.d/*      text eol=lf
+kvmapp/system/*.py          text eol=lf
+kvmapp/system/*.sh          text eol=lf
+kvmapp/jpg_stream/*         text eol=lf
+kvmapp/picoclaw/**/*.sh     text eol=lf
+kvmapp/picoclaw/**/*.md     text eol=lf
+kvmapp/picoclaw/**/*.yaml   text eol=lf
+tools/**/*.sh               text eol=lf
+tools/zram/S01zram          text eol=lf
+tools/slots/*.inc           text eol=lf
+tools/slots/*.its.in        text eol=lf
+*.sh                        text eol=lf
+
+# Device payloads that must stay byte-exact.
+*.ko                        binary
+*.so                        binary
+*.so.*                      binary
+kvmapp/kvm_system/*         binary
+kvmapp/kvm_new_app          binary

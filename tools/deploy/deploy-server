@@ -1,0 +1,235 @@
+#!/bin/sh
+#
+# Install a NanoKVM-Server build and put the old one back if it does not serve.
+# Runs ON the device. Stage the candidate on /data, never /tmp:
+#
+#   scp server/NanoKVM-Server root@<device>:/data/NanoKVM-Server.new
+#   scp tools/deploy/deploy-server root@<device>:/data/
+#   ssh root@<device> 'sh /data/deploy-server /data/NanoKVM-Server.new'
+#
+# /tmp is a 79MB tmpfs that S95nanokvm already fills with a copy of
+# /kvmapp/server. Staging a second 23MB binary there is how a deploy got
+# truncated in the first place, and cp reported the error to a caller that was
+# not checking. /data is 21GB of exFAT.
+#
+# Why this exists: nothing supervises NanoKVM-Server. S95nanokvm starts it with
+# `&` and inittab respawns only two gettys, so a build that crashes on startup
+# leaves the KVM unreachable over HTTP until a person intervenes. A backup file
+# and a manual copy are not a safety net - they only work when someone is
+# watching. This board is out-of-band management hardware, so its availability
+# outranks whatever the deploy was for.
+#
+# It detaches. A dropped ssh session must not abandon a deploy between removing
+# the old binary and proving the new one.
+#
+# Environment:
+#   DEPLOY_TIMEOUT   seconds to wait for HTTP 200      (default 45)
+#   DEPLOY_URL       what to probe                     (default loopback)
+#   DEPLOY_DIR       where backups live                (default /data/deploy)
+
+NEW=$1
+DEPLOY_TIMEOUT=${DEPLOY_TIMEOUT:-45}
+DEPLOY_URL=${DEPLOY_URL:-http://127.0.0.1/}
+DEPLOY_DIR=${DEPLOY_DIR:-/data/deploy}
+CURRENT=${CURRENT:-/kvmapp/server/NanoKVM-Server}
+GOOD=${GOOD:-$DEPLOY_DIR/known-good/NanoKVM-Server}
+RUNNING=${RUNNING:-/tmp/server/NanoKVM-Server}
+LOG=${DEPLOY_LOG:-$DEPLOY_DIR/deploy.log}
+
+say() {
+    echo "$*"
+    [ -d "$(dirname "$LOG")" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+}
+
+# running_matches_installed compares the copy S95nanokvm actually executes with
+# the file that was just installed.
+running_matches_installed() {
+    [ -f "$RUNNING" ] || return 1
+    [ "$(sha256sum "$RUNNING" | cut -d' ' -f1)" = "$(sha256sum "$CURRENT" | cut -d' ' -f1)" ]
+}
+
+candidate_is_elf() {
+    [ "$(head -c 4 "$NEW" | od -An -tx1 | tr -d ' 
+')" = "7f454c46" ]
+}
+
+candidate_size_kb() {
+    echo $(( $(wc -c < "$NEW") / 1024 ))
+}
+
+tmp_free_kb() {
+    df -k /tmp | awk 'NR==2{print $4}'
+}
+
+# serving reports whether the server answers. A 401 counts: the process is up,
+# has bound its port and read its config, which is what is being tested here.
+serving() {
+    code=$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 5 "$DEPLOY_URL" 2>/dev/null)
+    case "$code" in
+        2??|3??|401) return 0 ;;
+    esac
+    return 1
+}
+
+wait_for_service() {
+    waited=0
+    while [ "$waited" -lt "$DEPLOY_TIMEOUT" ]; do
+        serving && return 0
+        waited=$((waited + 1))
+        sleep 1
+    done
+    return 1
+}
+
+restart() {
+    # S95nanokvm backgrounds the server with `&`, so it inherits this shell's
+    # stdio and would hold the ssh session open. setsid detaches it properly;
+    # tools/build/README.md records the same trap.
+    setsid sh -c '/etc/init.d/S95nanokvm restart > /tmp/deploy-restart.log 2>&1' \
+        < /dev/null > /dev/null 2>&1 &
+}
+
+# --- verdict ---
+# Serving is necessary and not sufficient.
+#
+# S95nanokvm copies /kvmapp/server to /tmp/server and runs the copy. So an HTTP
+# 200 can come from a stale copy while the file just installed is corrupt. That
+# is not hypothetical: tmpfs filled up during a deploy, the candidate landed
+# truncated, and an earlier version of this script reported OK - leaving a board
+# that would have failed to start on its next reboot.
+#
+# A deploy is only good if the service answers AND what is running is what was
+# installed.
+verdict() {
+    if ! serving; then
+        echo restore
+        return
+    fi
+
+    if ! running_matches_installed; then
+        echo restore
+        return
+    fi
+
+    echo keep
+}
+
+# restore_worked reports whether the box came back after a rollback. A restore
+# that does not serve is the state this script exists to prevent, so the caller
+# has to be able to say so loudly instead of exiting 0.
+restore_worked() {
+    serving
+}
+# --- end verdict ---
+
+# --- preflight ---
+# Refuse before touching anything.
+#
+# The candidate must be intact. A short or empty file is the failure that started
+# all this, and a truncated Go binary can still start, so size alone is a weak
+# test - check that it is an ELF as well.
+#
+# tmpfs must also have room. /tmp is 79MB here and S95nanokvm copies the whole of
+# /kvmapp/server into it on every restart, so a deploy that fits on the SD card
+# can still be truncated on the way to the place it actually runs from. Ask for
+# the candidate's size plus half again, so the web assets and dl_lib beside it fit.
+preflight() {
+    if ! candidate_is_elf; then
+        return 1
+    fi
+
+    needed=$(candidate_size_kb)
+    free=$(tmp_free_kb)
+
+    [ "$free" -ge $((needed + needed / 2)) ]
+}
+# --- end preflight ---
+
+# --- snapshot ---
+# Keep a copy of the last binary that was proven to serve.
+#
+# Snapshot only while the server that is running right now answers. Deploy twice
+# in a row without this test and the second snapshot would preserve the first
+# broken binary as the thing to fall back to, which is worse than having no
+# snapshot at all.
+snapshot_if_proven() {
+    if ! serving; then
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$GOOD")"
+    cp "$CURRENT" "$GOOD"
+
+    return 0
+}
+# --- end snapshot ---
+
+main() {
+    [ -n "$NEW" ] || { echo "usage: deploy-server <new-binary>"; exit 1; }
+    [ -f "$NEW" ] || { echo "no such file: $NEW"; exit 1; }
+
+    mkdir -p "$DEPLOY_DIR/known-good"
+
+    say "deploy: starting, candidate $(wc -c < "$NEW") bytes"
+
+    if ! preflight; then
+        say "deploy: REFUSED - candidate is not an intact ELF, or /tmp has only $(tmp_free_kb)kB free for a $(candidate_size_kb)kB binary"
+        say "deploy: nothing was changed"
+        exit 4
+    fi
+
+    if snapshot_if_proven; then
+        say "deploy: snapshotted the running server as known-good ($(wc -c < "$GOOD") bytes)"
+    else
+        if [ -f "$GOOD" ]; then
+            say "deploy: server is not answering, keeping the existing known-good"
+        else
+            say "deploy: server is not answering and nothing is saved - no rollback available"
+        fi
+    fi
+
+    cp "$NEW" "$CURRENT"
+    chmod 755 "$CURRENT"
+    say "deploy: installed, restarting"
+    restart
+
+    if wait_for_service && [ "$(verdict)" = keep ]; then
+        say "deploy: OK, serving within ${DEPLOY_TIMEOUT}s and running what was installed"
+        exit 0
+    fi
+
+    if serving; then
+        say "deploy: FAILED - it serves, but $RUNNING is not the binary just installed"
+    else
+        say "deploy: FAILED to serve within ${DEPLOY_TIMEOUT}s"
+    fi
+
+    if [ ! -f "$GOOD" ]; then
+        say "deploy: no known-good binary to restore - the board needs attention"
+        exit 2
+    fi
+
+    say "deploy: restoring the known-good binary"
+    cp "$GOOD" "$CURRENT"
+    chmod 755 "$CURRENT"
+    restart
+
+    if wait_for_service && restore_worked; then
+        say "deploy: rolled back, serving again"
+        exit 1
+    fi
+
+    say "deploy: ROLLBACK ALSO FAILED - the board needs attention"
+    exit 3
+}
+
+# Detach, so that losing the ssh session cannot abandon the deploy between
+# replacing the binary and proving it.
+if [ "$DEPLOY_ATTACHED" = "1" ]; then
+    main
+else
+    mkdir -p "$DEPLOY_DIR"
+    DEPLOY_ATTACHED=1 setsid sh "$0" "$NEW" > "$DEPLOY_DIR/last-run.log" 2>&1 &
+    echo "deploy: running detached, watch $DEPLOY_DIR/last-run.log"
+    echo "deploy: it will restore the previous binary if the new one does not serve"
+fi

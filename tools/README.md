@@ -145,10 +145,24 @@ single 21s reading is not evidence of a regression.
 
 ## Recovering a board that will not boot
 
+Check which of these your enclosure actually gives you before you need one. On
+the Cube tested here the case exposes two buttons, and both are ATX passthrough
+to the managed host - `/etc/ipmi/chassis_control.sh` drives GPIO 503 and 505 as
+outputs, and reads the host power LED on 504. Neither resets the KVM. Software
+sees exactly one `gpio-keys` input, which is the LicheeRV Nano's own key, and
+whether the case exposes it (a pinhole, for instance) is untested here.
+
+There is no serial console either. `inittab` respawns a getty on `ttyGS0`, but
+`S03usbdev` only creates HID functions, so that device never appears. Adding an
+`acm` function would give the managed host a root console over the USB cable
+that is already connected - worth considering, and a security decision, because
+whoever controls the managed machine would then have root on the KVM.
+
 The stock initramfs has a mass-storage recovery mode that predates any of this:
 
-- `touch /boot/rec`, then reboot, or
-- hold the User Key while powering on.
+- `touch /boot/rec`, then reboot - which needs a working shell, so it is no use
+  for the failure it appears to solve, or
+- hold the User Key while powering on, if your enclosure exposes it.
 
 Either exposes the whole SD card to a USB host, so `/boot/slot` can be deleted
 or `boot.sd` restored from another machine without opening anything. This only

@@ -22,6 +22,7 @@ var imageVersionMap = map[string]string{
 	"2025-02-17-19-08-3649fe.img": "v1.4.0",
 	"2025-04-17-14-21-98d17d.img": "v1.4.1",
 	"2026-01-05-1_4_1.img":        "v1.4.2",
+	"2026-06-10-1_4_3.img":        "v1.4.3",
 }
 
 func (s *Service) GetInfo(c *gin.Context) {
@@ -73,8 +74,12 @@ func getMdns() string {
 	return fmt.Sprintf("%s.local", mdns)
 }
 
+// imageVersionFile is written when the SD card is flashed. Tests point it
+// elsewhere.
+var imageVersionFile = "/boot/ver"
+
 func getImageVersion() string {
-	content, err := os.ReadFile("/boot/ver")
+	content, err := os.ReadFile(imageVersionFile)
 	if err != nil {
 		return ""
 	}

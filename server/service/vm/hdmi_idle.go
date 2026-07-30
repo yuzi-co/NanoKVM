@@ -17,7 +17,35 @@ import (
 //
 // These are variables so the state machine can be tested without hardware.
 var (
-	setCapture      = func(on bool) { common.GetKvmVision().SetHDMI(on) }
+	// setCapture switches capture off and on for real.
+	//
+	// SetHDMI alone is not enough, and on most boards it does nothing at all:
+	// kvmv_hdmi_control drives HDMI receiver power on the PCIe board and
+	// returns immediately on alpha and beta, so the idle stop released nothing
+	// on a Cube or a Lite. It is still called, because on PCIe powering the
+	// receiver down is worth having, and because it is harmless where it is
+	// refused.
+	//
+	// Releasing the pipeline instead was tried, and it does not work. libkvm
+	// offers only kvmv_deinit for that, and calling it while the process keeps
+	// running segfaults inside the mmf layer:
+	//
+	//   try release vio ok
+	//   try release venc ok
+	//   mmf_add_vi_channel..
+	//   -- [E] Trigger signal, code:SIGSEGV(11)!
+	//
+	// Something in the maix camera layer re-enters init while the teardown is in
+	// progress. Joining libkvm's threads first and holding every frame read out
+	// with common's capture gate were both necessary and neither was sufficient,
+	// so kvmv_deinit stays what its original placement implies: a shutdown path.
+	//
+	// The consequence is worth stating plainly rather than hiding behind this
+	// call. On alpha and beta boards the idle timeout currently releases nothing,
+	// and the error that SetHDMI now logs says so on every transition. Making it
+	// real needs a pause that does not dismantle the pipeline - either a new
+	// libkvm entry point, or stopping the encoder while leaving VI up.
+	setCapture = func(on bool) { common.GetKvmVision().SetHDMI(on) }
 	idleTimeout     = func() time.Duration { return time.Duration(utils.GetHDMIIdleTimeout()) * time.Minute }
 	captureDisabled = utils.IsHdmiDisabled
 )

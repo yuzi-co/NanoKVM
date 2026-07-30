@@ -118,6 +118,9 @@ revert() {
 # An absent /boot/slot.good is a valid state and means slot A.
 
 start() {
+    # The watcher must not inherit this shell's stdio. It lives for up to
+    # DEADLINE seconds, and started over ssh it would hold the file descriptor
+    # open for that long before the ssh command returned.
     (
         waited=0
         while [ "$waited" -lt "$DEADLINE" ]; do
@@ -141,7 +144,7 @@ start() {
         log "$(revert)"
         sync
         reboot -f
-    ) &
+    ) < /dev/null > /dev/null 2>&1 &
 }
 
 case "$1" in

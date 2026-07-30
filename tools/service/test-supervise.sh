@@ -13,8 +13,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 sed -n '/^# --- decide ---$/,/^# --- end decide ---$/p'   "$SV" > "$WORK/decide.sh"
 sed -n '/^# --- backoff ---$/,/^# --- end backoff ---$/p' "$SV" > "$WORK/backoff.sh"
+sed -n '/^# --- cure ---$/,/^# --- end cure ---$/p'       "$SV" > "$WORK/cure.sh"
 [ -s "$WORK/decide.sh" ]  || { echo "could not extract the decide block"; exit 1; }
 [ -s "$WORK/backoff.sh" ] || { echo "could not extract the backoff block"; exit 1; }
+[ -s "$WORK/cure.sh" ]    || { echo "could not extract the cure block"; exit 1; }
 
 fails=0
 note() { printf '  %-60s %s\n' "$1" "$2"; [ "$2" = FAIL ] && fails=$((fails + 1)); return 0; }
@@ -24,22 +26,58 @@ echo "===== crashed, or stopped on purpose? ====="
 # after killing the process, so the binary's presence is the operator's intent.
 # Without this the supervisor would fight every deliberate stop.
 decide_case() {
-    desc="$1"; binary="$2"; running="$3"; want="$4"
-    got=$(BIN="$binary" RUN="$running" WORK="$WORK" sh -c '
-        binary_present() { [ "$BIN" = yes ]; }
+    desc="$1"; binary="$2"; running="$3"; serving="$4"; unhealthy="$5"; want="$6"
+    got=$(BIN="$binary" RUN="$running" SRV="$serving" UNW="$unhealthy" WORK="$WORK" sh -c '
+        binary_present()  { [ "$BIN" = yes ]; }
         process_running() { [ "$RUN" = yes ]; }
+        serving()         { [ "$SRV" = yes ]; }
+        unhealthy_for()   { echo "$UNW"; }
         . "$WORK/decide.sh"
         action
     ')
     [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
 }
 
-decide_case "running normally"                       yes yes healthy
-decide_case "binary staged but no process: crashed"  yes no  restart
-decide_case "stopped on purpose, /tmp/server gone"   no  no  stopped
+#           binary running serving unhealthy-for  want
+decide_case "running and answering"          yes yes yes 0   healthy
+decide_case "binary staged but no process"   yes no  no  0   restart
+decide_case "stopped on purpose"             no  no  no  0   stopped
 # Odd but real during a restart: the old process is still dying while /tmp/server
 # has already been removed. Interfering there would race S95nanokvm.
-decide_case "no binary but a process still alive"    no  yes healthy
+decide_case "no binary, process still dying" no  yes no  0   healthy
+
+echo
+echo "  --- alive but not answering: a hang"
+# The failure the supervisor could not see. A process that is up and not serving
+# looks healthiest of all from outside, and pidof cannot tell the difference.
+#
+# A board reboot is the wrong response: it costs 17s, risks the boot path, and can
+# land on a slot without any of this. Restarting the server is cheaper and safer,
+# so the hardware watchdog is reserved for a kernel lockup that userspace cannot
+# act on at all.
+decide_case "just stopped answering, still inside grace" yes yes no 10  healthy
+decide_case "not answering for a minute: hung"           yes yes no 60  hung
+decide_case "not answering for a long time"              yes yes no 600 hung
+
+# Never on ambiguity. A curl that cannot run, a probe that errors, a slow start
+# under heavy IO - none of those are worth killing a working KVM for, so the
+# grace period has to be generous and the default has to be inaction.
+decide_case "answering again before the threshold"       yes yes yes 59  healthy
+
+echo
+echo "===== curing a hang means killing it first ====="
+# S95nanokvm's restart uses killall, which is SIGTERM. A wedged process may never
+# act on that, and while it lives it holds port 80 - so the replacement could not
+# bind and the hang would survive its own cure.
+got=$(WORK="$WORK" sh -c '
+    force_kill()   { echo "kill"; }
+    wait_gone()    { echo "waited"; }
+    full_restart() { echo "restart"; }
+    . "$WORK/cure.sh"
+    cure_hung
+' | tr '
+' ' ')
+[ "$got" = "kill waited restart " ]     && note "SIGKILL, wait for it to go, then the normal restart" OK     || note "order was [$got], want [kill waited restart ]" FAIL
 
 echo
 echo "===== the retry delay grows and is capped ====="
@@ -86,6 +124,14 @@ grep -q 'setsid "\$0" __watch' "$SV" \
 grep -q '__watch)' "$SV" \
     && note "the entry point setsid re-enters is handled" OK \
     || note "setsid re-enters a subcommand the script does not handle" FAIL
+
+# A wiring check, here because cure_hung was defined and never called while every
+# case above stayed green: it was testable in isolation and unreachable from the
+# loop. Like the setsid check this asserts a string, so the real evidence is the
+# on-device test that wedges the server and watches it come back.
+grep -qE '^[[:space:]]+cure_hung$' "$SV" \
+    && note "the hang branch actually calls cure_hung" OK \
+    || note "cure_hung is defined but never reached" FAIL
 
 echo
 if [ "$fails" -eq 0 ]; then

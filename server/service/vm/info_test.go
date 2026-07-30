@@ -29,6 +29,41 @@ func useVersionFile(t *testing.T, contents string) {
 	applicationVersionFile = path
 }
 
+// useImageFile writes a `ver` file for one test and points the reader at it.
+func useImageFile(t *testing.T, contents string) {
+	t.Helper()
+
+	originalPath := imageVersionFile
+	t.Cleanup(func() {
+		imageVersionFile = originalPath
+	})
+
+	path := filepath.Join(t.TempDir(), "ver")
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("failed to write ver file: %s", err)
+	}
+
+	imageVersionFile = path
+}
+
+// Every released image needs a map entry. Without one the UI shows the raw
+// file name, which reads as a fault rather than as a version.
+func TestGetImageVersionNamesEveryReleasedImage(t *testing.T) {
+	releases := map[string]string{
+		"2025-02-17-19-08-3649fe.img": "v1.4.0",
+		"2025-04-17-14-21-98d17d.img": "v1.4.1",
+		"2026-01-05-1_4_1.img":        "v1.4.2",
+		"2026-06-10-1_4_3.img":        "v1.4.3",
+	}
+
+	for file, want := range releases {
+		useImageFile(t, file+"\n")
+		if got := getImageVersion(); got != want {
+			t.Errorf("getImageVersion() = %q for %s, want %q", got, file, want)
+		}
+	}
+}
+
 func useBuildStamp(t *testing.T, stamp string) {
 	t.Helper()
 

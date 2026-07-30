@@ -11,6 +11,8 @@ are operator tools.
 | `slots/device/S00awatchdog` | Reverts the slot marker if a board under test never becomes reachable. |
 | `zram/`       | Build `zram.ko`/`zsmalloc.ko` for the stock kernel, and enable them.   |
 | `oled/`       | Move the status image to spread OLED wear, with no change to `kvm_system`. |
+| `service/`    | Restart `NanoKVM-Server` and `kvm_system` if they die. Nothing else does. |
+| `deploy/`     | Install a server build and put the old one back if it does not serve.   |
 
 ## Ten things that cost real time
 
@@ -142,6 +144,51 @@ not survive a slot image built from a fresh rootfs.
 Do not measure link-up from one boot. On this hardware it is heavy-tailed:
 63 samples on a good cable gave a median of 6s and a maximum of 40s, so a
 single 21s reading is not evidence of a regression.
+
+## Keeping the server up
+
+Nothing supervises `NanoKVM-Server`. `S95nanokvm` starts it with `&`, and
+`inittab` respawns only two gettys, so a segfault leaves the KVM unreachable over
+HTTP until a person intervenes. On out-of-band management hardware that is the
+worst failure available: the board exists to answer when the machine it controls
+does not.
+
+`service/S98supervise` closes that. It is additive - it never starts the services
+at boot, so if it is wrong the worst it does is nothing - and it needs no change
+to `S95nanokvm`, because a deliberate stop already leaves a signal:
+`S95nanokvm stop` removes `/tmp/server` after killing the process.
+
+| `/tmp/server/NanoKVM-Server` | process | verdict |
+| ---------------------------- | ------- | ------- |
+| present                      | absent  | it died, restart it |
+| absent                       | absent  | someone stopped it, leave it alone |
+
+Measured on hardware: `kill -9` on the server, **serving again 8 seconds later**
+with no help. A deliberate `stop` was left down for 25 seconds untouched.
+
+The retry delay grows 5, 10, 20, 40 and holds at 60 seconds, and never gives up:
+a binary that cannot start must not be retried in a tight loop on a single core,
+and must not be abandoned either. A run lasting a minute resets the delay, so a
+board that crashes once a day does not creep to the cap and stay there.
+
+`deploy/deploy-server` is the other half. It snapshots, installs, restarts,
+probes, and restores the previous binary if the new one does not answer. Two of
+its checks are less obvious than they look, and both are there because the first
+version got them wrong:
+
+- **Serving is not sufficient.** `S95nanokvm` runs a copy from `/tmp`, so an HTTP
+  200 can come from a stale copy while the file just installed is corrupt. That
+  happened: `/tmp` is a 79MB tmpfs, a 23MB candidate was staged into it on top of
+  24MB of build leftovers, `cp` failed with ENOSPC, and a truncated binary was
+  reported as a successful deploy. Stage on `/data`, and require that what is
+  running is what was installed.
+- **The known-good copy is only replaced while the server answers.** Otherwise
+  deploying twice preserves the first broken binary as the fallback.
+
+Both scripts detach with `setsid`. Redirecting a background loop's stdio to
+`/dev/null` looks sufficient and is not: measured over ssh, an earlier
+`S98supervise start` printed its line and then held the session open until the
+client gave up after five minutes.
 
 ## Recovering a board that will not boot
 

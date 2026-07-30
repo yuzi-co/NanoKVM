@@ -30,7 +30,7 @@ func (h *Hid) keyboardReports(queue <-chan QueuedReport, path string) {
 		if err := runCleanup(execute, func() error {
 			return h.writeHID(h.keyboardDevice(path), keyboardReleaseReport())
 		}); err != nil {
-			log.Errorf("release keyboard on queue close failed: %s", err)
+			reportWriteFailure("release keyboard on queue close failed", err)
 			return
 		}
 		if resetKeyboard != nil {
@@ -50,7 +50,7 @@ func (h *Hid) keyboardReports(queue <-chan QueuedReport, path string) {
 		if err := event.run(func() error {
 			return h.writeHID(h.keyboardDevice(path), event.Data)
 		}); err != nil {
-			log.Errorf("write to %s failed: %s", path, err)
+			reportWriteFailure("write to "+path+" failed", err)
 			if dropped := drainHIDQueue(queue); dropped > 0 {
 				log.Debugf("dropped %d stale keyboard HID reports after write failure", dropped)
 			}
@@ -58,7 +58,7 @@ func (h *Hid) keyboardReports(queue <-chan QueuedReport, path string) {
 				return h.writeHID(h.keyboardDevice(path), keyboardReleaseReport())
 			})
 			if cleanupErr != nil {
-				log.Errorf("release keyboard after write failure failed: %s", cleanupErr)
+				reportWriteFailure("release keyboard after write failure failed", cleanupErr)
 				keyboardActive = keyboardActive || keyboardReportActive(event.Data)
 				event.complete(false)
 				continue

@@ -3,8 +3,7 @@ import { useAtom } from 'jotai';
 import { CheckIcon, SquareDashedMousePointerIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import * as ls from '@/lib/localstorage.ts';
-import { client } from '@/lib/websocket.ts';
+import { applyMouseMode } from '@/lib/mouse-mode.ts';
 import { mouseModeAtom } from '@/jotai/mouse.ts';
 
 export const MouseMode = () => {
@@ -18,15 +17,7 @@ export const MouseMode = () => {
   ];
 
   function updateMouseMode(mode: string) {
-    setMouseMode(mode);
-    ls.setMouseMode(mode);
-
-    if (mode === 'relative') {
-      client.close();
-      setTimeout(() => {
-        client.connect();
-      }, 500);
-    }
+    applyMouseMode(mode, setMouseMode);
   }
 
   const content = (

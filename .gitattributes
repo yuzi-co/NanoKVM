@@ -20,6 +20,10 @@ kvmapp/picoclaw/**/*.sh     text eol=lf
 kvmapp/picoclaw/**/*.md     text eol=lf
 kvmapp/picoclaw/**/*.yaml   text eol=lf
 tools/**/*.sh               text eol=lf
+# Device scripts are named for their boot order, so most of them have no
+# extension. Cover the directory rather than a list that the next script is
+# added outside of.
+tools/slots/device/*        text eol=lf
 tools/zram/S01zram          text eol=lf
 tools/slots/*.inc           text eol=lf
 tools/slots/*.its.in        text eol=lf

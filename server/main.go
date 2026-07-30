@@ -6,7 +6,6 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 
 	"NanoKVM-Server/common"
 	"NanoKVM-Server/config"
@@ -43,8 +42,20 @@ func initialize() {
 	_ = common.GetScreen()
 
 	// init HDMI
-	vm.DisableHdmiCapture()
-	time.Sleep(10 * time.Millisecond)
+	//
+	// There used to be a DisableHdmiCapture() and a 10ms sleep in front of
+	// this. It was a power cycle of the HDMI receiver, and it did nothing
+	// useful in either direction. On alpha and beta boards kvmv_hdmi_control
+	// declines the call outright, so the pair was dead code. On the PCIe board
+	// it did toggle the receiver, 10ms apart, which is a number copied from
+	// libkvm rather than one the receiver was measured against - and
+	// EnableHdmiCapture powers the receiver on anyway, so the cycle added a
+	// teardown nothing had asked for. `Settings > Reset HDMI` exists for a
+	// deliberate cycle and waits a full second between the halves.
+	//
+	// The idle bookkeeping that DisableHdmiCapture also does is all zero-valued
+	// in a process that has only just started, so dropping the call loses it
+	// nothing.
 	if !utils.IsHdmiDisabled() {
 		vm.EnableHdmiCapture()
 	}

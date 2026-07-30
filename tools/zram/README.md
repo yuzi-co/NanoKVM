@@ -26,8 +26,35 @@ The scarce resource on this board is CPU, not compression ratio: one in-order
 C906 at 1GHz with no acceleration, also running H.264 encode. Compression is
 paid on swap-*out*, which happens under memory pressure — exactly when that core
 is already saturated. zstd costs several times more there for a better ratio.
-Measured on real swapped pages, lzo-rle reached about 5x, which leaves zstd very
-little to win.
+
+## Reconsidered, with numbers
+
+The reason above is a *kernel config* constraint, and this repository can now
+build modules against the stock kernel — that is what `build-modules.sh` does.
+So `CONFIG_CRYPTO_LZ4` could be built and lz4 offered to zram. Measured on a
+live board, it would buy nothing:
+
+```
+zram offers   : lzo [lzo-rle] zstd
+ratio         : 2.76x   (orig 3.21 MB -> compressed 1.17 MB)
+mem_used      : 1.63 MB against the 40 MB mem_limit -> 4% of the cap
+swap in use   : 3.2 MB of 96 MB
+lifetime      : pswpout 40449 pages, pswpin 6503
+```
+
+Ratio is not the binding constraint: at 4% of the cap, a much worse ratio would
+still fit. lz4 over lzo-rle is a few percent of compression time on a board that
+idles at 5% of one core. And lzo-rle is the kernel's default for zram because of
+its run-length handling of zero pages, which is most of what swap holds — lz4
+has no equivalent. Against that, an extra module pinned to the kernel's vermagic
+has to be rebuilt whenever the kernel moves.
+
+If this is revisited, measure CPU during a sustained swap-out, not the ratio.
+The ratio is already comfortable and is not what costs anything here.
+
+An earlier version of this file claimed lzo-rle "reached about 5x". Today it
+measures 2.76x on live pages. Both are real; they are different workloads, and
+a single figure should not have been stated as the property of the algorithm.
 
 Switching is one write, before `disksize` is set:
 

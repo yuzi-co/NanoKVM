@@ -1,0 +1,208 @@
+#!/bin/sh
+#
+# Move the OLED image by one row every few minutes, so a status screen that
+# never changes does not burn itself into the panel.
+#
+# Install as /etc/init.d/S97oled-nudge, mode 755. The number puts it after
+# S95nanokvm, which is what starts kvm_system and therefore what initialises the
+# display; the first write happens one period later in any case.
+#
+# Why this needs no change to kvm_system: the SSD1306 display offset is a
+# property of the controller, not of the frame buffer. Command 0xD3 shifts which
+# COM line row zero drives, so the whole image moves without the drawing code
+# knowing. kvm_system sets it to 0 once during OLED_Init and never writes it
+# again, so a value set here survives every redraw.
+#
+# What it does not do: the shift wraps. Rows pushed off the bottom reappear at
+# the top. With a travel of one or two rows on a 64 row panel that is invisible
+# while the bottom rows are blank, and obvious if they are not - so look at the
+# screen once with `demo` before trusting a larger travel.
+#
+# Cost: one I2C transaction every period. kvm_system writes the panel far more
+# often than that, and it sends each command byte as its own transaction, so a
+# nudge can in principle land in the middle of one of its command pairs. The
+# worst case is one malformed frame, corrected by the next redraw. A long period
+# keeps that rare; there is no way to hold the bus against another process.
+#
+# Environment:
+#   OLED_BUS, OLED_ADDR      skip detection and use these
+#   OLED_NUDGE_MAX           rows of travel, 0 disables movement (default 2)
+#   OLED_NUDGE_PERIOD        seconds between moves       (default 600)
+
+MAX=${OLED_NUDGE_MAX:-2}
+PERIOD=${OLED_NUDGE_PERIOD:-600}
+PIDFILE=/tmp/oled-nudge.pid
+
+# --- offset sequence ---
+# clamp_max keeps the travel inside the display offset field, which is six bits.
+# A larger value would set bits that belong to no part of the command.
+clamp_max() {
+    m=$1
+    [ "$m" -lt 0 ] 2>/dev/null && m=0
+    [ "$m" -gt 63 ] 2>/dev/null && m=63
+    echo "$m"
+}
+
+# triangle walks 0 to max and back again, so every move is one row. A saw-tooth
+# would snap the whole image back in a single step, which reads as a glitch
+# rather than as a screen that does not sit still.
+triangle() {
+    step=$1
+    max=$2
+    [ "$max" -le 0 ] && { echo 0; return; }
+    period=$((max * 2))
+    p=$((step % period))
+    if [ "$p" -le "$max" ]; then
+        echo "$p"
+    else
+        echo $((period - p))
+    fi
+}
+# --- end offset sequence ---
+
+# probe reports whether anything answers at an address. i2cdetect prints the
+# address itself in the cell when a device replies.
+#
+# Scan the one address, not the whole bus. Measured on this board a full sweep
+# costs 76ms per bus against 6ms for a single address, and a sweep also pokes the
+# 111 addresses that are not the panel - on bus 4 that would include the HDMI
+# receiver. Two buses are probed at boot, so the sweep was the larger part of
+# what this script cost before the first nudge ever happened.
+probe() {
+    short=$(echo "$2" | sed 's/^0[xX]//')
+    i2cdetect -y -r "$1" "$2" "$2" 2>/dev/null | awk -v want="$short" '
+        NR > 1 {
+            for (i = 2; i <= NF; i++)
+                if (tolower($i) == tolower(want)) found = 1
+        }
+        END { exit !found }'
+}
+
+# --- device detection ---
+# hw=beta puts the panel on bus 5 and hw=alpha on bus 1. The PCIe board answers
+# at 0x3c rather than 0x3d. Probe rather than trust /etc/kvm/hw: a wrong guess
+# sends display commands to whatever else lives at that address.
+find_oled() {
+    for bus in 1 5; do
+        for addr in 0x3d 0x3c; do
+            if probe "$bus" "$addr"; then
+                echo "$bus $addr"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+# --- end device detection ---
+
+# SSD1306: control byte 0x00 selects the command stream, 0xD3 is set display
+# offset, and the byte after it is the row count.
+set_offset() {
+    i2cset -y "$1" "$2" 0x00 0xD3 "$3" i
+}
+
+resolve() {
+    if [ -n "$OLED_BUS" ] && [ -n "$OLED_ADDR" ]; then
+        BUS=$OLED_BUS
+        ADDR=$OLED_ADDR
+        return 0
+    fi
+    set -- $(find_oled)
+    BUS=$1
+    ADDR=$2
+    [ -n "$BUS" ]
+}
+
+start() {
+    printf "oled-nudge: "
+
+    if ! resolve; then
+        echo "no panel found, nothing to do"
+        return 0
+    fi
+
+    max=$(clamp_max "$MAX")
+    if [ "$max" -eq 0 ]; then
+        echo "disabled (travel 0)"
+        return 0
+    fi
+
+    # The loop never returns, so it must not inherit this shell's stdio. Started
+    # over ssh it would otherwise hold the file descriptor open and the ssh
+    # command would never come back. tools/build/README.md records the same trap
+    # for S95nanokvm.
+    (
+        step=0
+        while :; do
+            sleep "$PERIOD"
+            set_offset "$BUS" "$ADDR" "$(triangle "$step" "$max")" 2>/dev/null
+            step=$((step + 1))
+        done
+    ) < /dev/null > /dev/null 2>&1 &
+
+    echo "$!" > "$PIDFILE"
+    echo "OK (bus $BUS, ${ADDR}, ${max} rows every ${PERIOD}s)"
+}
+
+stop() {
+    printf "oled-nudge: "
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+    # Put the image back where the drawing code thinks it is.
+    if resolve; then
+        set_offset "$BUS" "$ADDR" 0 2>/dev/null
+        echo "stopped, offset reset to 0"
+    else
+        echo "stopped"
+    fi
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|reload)
+        stop
+        start
+        ;;
+    status)
+        if resolve; then
+            echo "panel  : bus $BUS at $ADDR"
+        else
+            echo "panel  : not found"
+        fi
+        echo "travel : $(clamp_max "$MAX") rows"
+        echo "period : ${PERIOD}s"
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "running: yes (pid $(cat "$PIDFILE"))"
+        else
+            echo "running: no"
+        fi
+        ;;
+    demo)
+        # Walk the full travel with a visible delay, so the movement can be
+        # judged on the panel before a period of ten minutes hides it.
+        resolve || { echo "no panel found"; exit 1; }
+        max=$(clamp_max "${2:-$MAX}")
+        echo "walking 0..$max..0 on bus $BUS at $ADDR, one row a second"
+        step=0
+        while [ "$step" -le $((max * 2)) ]; do
+            off=$(triangle "$step" "$max")
+            echo "  offset $off"
+            set_offset "$BUS" "$ADDR" "$off"
+            step=$((step + 1))
+            sleep 1
+        done
+        set_offset "$BUS" "$ADDR" 0
+        echo "  offset 0 (back to where it started)"
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|demo [rows]}"
+        exit 1
+        ;;
+esac

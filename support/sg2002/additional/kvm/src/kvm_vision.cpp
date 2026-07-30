@@ -98,6 +98,17 @@ typedef struct {
     uint8_t vi_detect_state = 0;
     uint8_t venc_auto_recyc = 0;
     uint8_t fresh_frame_count = 0;
+    // Handles for the two threads kvmv_init starts, so kvmv_deinit can join
+    // them. Both used to be written into one local in kvmv_init - the second
+    // pthread_create overwrote the first - so neither could be waited for. That
+    // left kvmv_deinit destroying vi_mutex while a thread was still using it,
+    // and left kvmv_init reading thread_is_running while the old thread was
+    // deciding whether to exit. Both threads break on try_exit_thread, and the
+    // slower poll is 500ms, so the joins are bounded.
+    pthread_t detect_thread;
+    pthread_t watchdog_thread;
+    uint8_t detect_thread_valid = 0;
+    uint8_t watchdog_thread_valid = 0;
 } kvmv_cfg_t;
 
 typedef struct {
@@ -1604,7 +1615,6 @@ int8_t raw_to_h264(image::Image *raw, kvmv_data_t* ret_stream, uint16_t _qlty)
 
 void kvmv_init(uint8_t _debug_info_en)
 {
-    pthread_t thread;
     pthread_mutex_init(&vi_mutex, NULL);
     if(_debug_info_en == 0) debug_en = 0;
     else                    debug_en = 1;
@@ -1624,14 +1634,18 @@ void kvmv_init(uint8_t _debug_info_en)
     if(kvmv_cfg.thread_is_running == 1){
         debug("[kvmv]thread is running!\r\n");
     } else {
-        if (0 != pthread_create(&thread, NULL, vi_subsystem_detection, NULL)) {
+        if (0 != pthread_create(&kvmv_cfg.detect_thread, NULL, vi_subsystem_detection, NULL)) {
             debug("[kvmv]create vi_subsystem_detection thread failed!\r\n");
             // return -1;
+        } else {
+            kvmv_cfg.detect_thread_valid = 1;
         }
 
-        if (0 != pthread_create(&thread, NULL, watchdog_sf_feed, NULL)) {
+        if (0 != pthread_create(&kvmv_cfg.watchdog_thread, NULL, watchdog_sf_feed, NULL)) {
             debug("[kvmv]create watchdog_sf_feed thread failed!\r\n");
             // return -1;
+        } else {
+            kvmv_cfg.watchdog_thread_valid = 1;
         }
     }
     // debug("[kvmv]kvmv_init - 3\r\n");
@@ -1905,8 +1919,33 @@ void free_all_kvmv_data()
 
 void kvmv_deinit()
 {
-    pthread_mutex_destroy(&vi_mutex);
+    // Order matters, and it used to be wrong. vi_mutex was destroyed first,
+    // before the threads were even told to stop, so a thread could be holding
+    // or waiting on it at that moment - and kvmv_read_img takes the same mutex.
+    // Destroying a locked mutex is undefined, and so is locking a destroyed one.
+    //
+    // Ask both threads to stop, wait for them, and only then take the pipeline
+    // apart. Both break on try_exit_thread and the slower one polls every 500ms,
+    // so this returns in well under a second.
+    //
+    // Waiting also removes a second fault. vi_subsystem_detection clears
+    // thread_is_running as it leaves, and kvmv_init reads that flag to decide
+    // whether to start the threads again. Without the join, an init that arrived
+    // while the old thread was still exiting would skip creating a new one and
+    // then watch the old one die, leaving the board with no HDMI detection until
+    // the process restarted.
     kvmv_cfg.try_exit_thread = 1;
+
+    if (kvmv_cfg.detect_thread_valid) {
+        pthread_join(kvmv_cfg.detect_thread, NULL);
+        kvmv_cfg.detect_thread_valid = 0;
+    }
+    if (kvmv_cfg.watchdog_thread_valid) {
+        pthread_join(kvmv_cfg.watchdog_thread, NULL);
+        kvmv_cfg.watchdog_thread_valid = 0;
+    }
+
+    pthread_mutex_destroy(&vi_mutex);
     cam->close();
     mmf_deinit();
     free_all_kvmv_data();

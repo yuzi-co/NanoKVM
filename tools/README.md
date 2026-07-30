@@ -195,9 +195,13 @@ client gave up after five minutes.
 Check which of these your enclosure actually gives you before you need one. On
 the Cube tested here the case exposes two buttons, and both are ATX passthrough
 to the managed host - `/etc/ipmi/chassis_control.sh` drives GPIO 503 and 505 as
-outputs, and reads the host power LED on 504. Neither resets the KVM. Software
-sees exactly one `gpio-keys` input, which is the LicheeRV Nano's own key, and
-whether the case exposes it (a pinhole, for instance) is untested here.
+outputs, and reads the host power LED on 504. Neither resets the KVM.
+
+Software sees exactly one `gpio-keys` input, which is the LicheeRV Nano's own
+User Key. **This case does not expose it.** The small hole in the shell was
+examined and holds no switch. So the Cube has no physical control that acts on
+the KVM: every recovery below needs either a working shell or the SD card in a
+reader.
 
 There is no serial console either. `inittab` respawns a getty on `ttyGS0`, but
 `S03usbdev` only creates HID functions, so that device never appears. Adding an
@@ -207,11 +211,24 @@ whoever controls the managed machine would then have root on the KVM.
 
 The stock initramfs has a mass-storage recovery mode that predates any of this:
 
-- `touch /boot/rec`, then reboot - which needs a working shell, so it is no use
-  for the failure it appears to solve, or
-- hold the User Key while powering on, if your enclosure exposes it.
+- `touch /boot/rec`, then reboot, or
+- hold the User Key while powering on.
 
-Either exposes the whole SD card to a USB host, so `/boot/slot` can be deleted
-or `boot.sd` restored from another machine without opening anything. This only
-works if `boot.sd` itself still loads; a corrupt one needs the card in a reader.
-Keep a copy of the stock image before replacing it.
+Either exposes the whole SD card to a USB host, so `/boot/slot` can be deleted or
+`boot.sd` restored from another machine without opening anything.
+
+Neither is available on this Cube. The marker file needs a working shell, which
+is the thing that has failed; the User Key is not brought out to the case. That
+leaves opening the enclosure and putting the card in a reader, so the software
+that avoids reaching that point carries the whole load:
+
+| what fails | what recovers it | needs a person? |
+| --- | --- | --- |
+| the server crashes or wedges | `S98supervise` | no |
+| a deploy does not serve | `deploy-server` restores the previous binary | no |
+| a slot never becomes reachable | `S00awatchdog` reverts the marker and reboots | no |
+| the boot path itself | SD card in a reader | **yes, and the case must come off** |
+
+Keep a copy of the stock image before replacing it, and keep the fallback slot
+carrying these scripts - a revert that drops them lands on a board with no
+recovery at all.

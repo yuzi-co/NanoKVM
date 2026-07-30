@@ -24,6 +24,12 @@
 #   SUPERVISE_LOG        where events go          (default /data/supervise.log)
 
 INTERVAL=${SUPERVISE_INTERVAL:-5}
+# Seconds a process may be alive and not answering before it counts as hung. A
+# minute is deliberately long: the cost of acting too early is killing a working
+# KVM, and the cost of acting late is a few more seconds of an outage that has
+# already happened.
+HANG_AFTER=${SUPERVISE_HANG_AFTER:-60}
+HEALTH_URL=${SUPERVISE_URL:-http://127.0.0.1/}
 LOG=${SUPERVISE_LOG:-/data/supervise.log}
 PIDFILE=/tmp/supervise.pid
 
@@ -43,9 +49,34 @@ log() {
 # The last case looks strange and is real: during `S95nanokvm restart` the old
 # process can still be dying after /tmp/server has been removed. Treating that
 # as a crash would race the restart and start a second server.
+# A hang is the failure pidof cannot see: the process is up and not serving, which
+# from outside looks healthiest of all. It gets its own verdict because the cure
+# differs - a crash needs starting, a hang needs killing first.
+#
+# The response is to restart the server, not to reboot the board. A reboot costs
+# 17 seconds, puts the boot path at risk, and can land on a slot carrying none of
+# these protections. The hardware watchdog is the right tool only for a kernel
+# lockup, where no userspace process can act at all.
+#
+# The threshold is deliberately generous and the default is inaction. A probe that
+# cannot run, a slow start under heavy IO, a moment of SD contention - none of
+# those is worth killing a working KVM for.
 action() {
     if process_running; then
-        echo healthy
+        if serving; then
+            echo healthy
+            return
+        fi
+
+        # The default lives here rather than only at the top of the file, so this
+        # block stands alone when the test extracts it - and so the test measures
+        # the threshold that actually ships.
+        if [ "$(unhealthy_for)" -ge "${HANG_AFTER:-60}" ]; then
+            echo hung
+        else
+            echo healthy
+        fi
+
         return
     fi
 
@@ -56,6 +87,19 @@ action() {
     fi
 }
 # --- end decide ---
+
+# --- cure ---
+# A hang has to be killed, not asked to stop. S95nanokvm's restart uses killall,
+# which sends SIGTERM, and a wedged process may never act on it - it would keep
+# port 80 and the replacement could not bind, so the hang would survive its own
+# cure. SIGKILL first, wait for the process to actually go, then use the normal
+# restart path so /tmp is re-staged and kvm_system comes with it.
+cure_hung() {
+    force_kill
+    wait_gone
+    full_restart
+}
+# --- end cure ---
 
 # --- backoff ---
 # A binary that can never start must not be retried in a tight loop: this board
@@ -105,22 +149,78 @@ system_running() {
     pidof kvm_system > /dev/null 2>&1
 }
 
+# A 401 counts as serving: the process is up, has bound its port and read its
+# config. If curl itself cannot run, this reports serving - never reboot or
+# restart a KVM because a probe broke.
+serving() {
+    [ -x "$(command -v curl)" ] || return 0
+
+    code=$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 4 "$HEALTH_URL" 2>/dev/null)
+    case "$code" in
+        2??|3??|401) return 0 ;;
+    esac
+    return 1
+}
+
+now() {
+    cut -d. -f1 /proc/uptime
+}
+
+force_kill() {
+    killall -9 NanoKVM-Server 2>/dev/null
+}
+
+wait_gone() {
+    i=0
+    while [ "$i" -lt 10 ]; do
+        process_running || return 0
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
+full_restart() {
+    setsid sh -c '/etc/init.d/S95nanokvm restart > /tmp/supervise-restart.log 2>&1' \
+        < /dev/null > /dev/null 2>&1 &
+}
+
+# How long the server has been alive without answering. LAST_OK is maintained by
+# the watch loop.
+unhealthy_for() {
+    echo $(( $(now) - LAST_OK ))
+}
+
 watch_loop() {
     delay=$(first_delay)
-    started=$(cut -d. -f1 /proc/uptime)
+    started=$(now)
+    LAST_OK=$(now)
 
     while :; do
         sleep "$INTERVAL"
 
+        serving && LAST_OK=$(now)
+
         case "$(action)" in
             healthy)
-                started=$(cut -d. -f1 /proc/uptime)
+                started=$(now)
+                ;;
+
+            hung)
+                stuck=$(unhealthy_for)
+                log "NanoKVM-Server is up but has not answered for ${stuck}s, killing and restarting it"
+                cure_hung
+                # Give it room to come up before judging again, or a slow start
+                # would be read as another hang.
+                sleep 30
+                LAST_OK=$(now)
+                started=$(now)
                 ;;
             stopped)
                 : # someone asked for this
                 ;;
             restart)
-                ran=$(( $(cut -d. -f1 /proc/uptime) - started ))
+                ran=$(( $(now) - started ))
                 log "NanoKVM-Server is gone after ${ran}s, restarting in ${delay}s"
                 sleep "$delay"
 
@@ -132,7 +232,8 @@ watch_loop() {
                 fi
 
                 delay=$(delay_after_run "$ran" "$delay")
-                started=$(cut -d. -f1 /proc/uptime)
+                started=$(now)
+                LAST_OK=$(now)
                 ;;
         esac
 
@@ -199,7 +300,9 @@ case "$1" in
         else
             echo "supervisor : not running"
         fi
+        LAST_OK=$(now); serving || LAST_OK=0
         echo "verdict    : $(action)"
+        echo "answering  : $(serving && echo yes || echo no)"
         echo "server     : $(process_running && echo up || echo down)"
         echo "kvm_system : $(system_running && echo up || echo down)"
         echo "recent     :"

@@ -10,8 +10,9 @@ are operator tools.
 | `slots/`      | A/B root filesystems: patch the initramfs, build and install a slot.   |
 | `slots/device/S00awatchdog` | Reverts the slot marker if a board under test never becomes reachable. |
 | `zram/`       | Build `zram.ko`/`zsmalloc.ko` for the stock kernel, and enable them.   |
+| `oled/`       | Move the status image to spread OLED wear, with no change to `kvm_system`. |
 
-## Seven things that cost real time
+## Ten things that cost real time
 
 **The initramfs `PATH` is `/`, and only twelve applets are symlinked.** busybox
 inside the initramfs carries 402 applets, but `losetup` is not one of the names
@@ -38,8 +39,10 @@ and arrives in the working tree with CRLF. busybox then reads the carriage
 return as part of the command name, and every line fails. The script exits 127
 for a reason that has nothing to do with a missing applet. At boot the only
 symptom is a port that does not answer. `.gitattributes` pins `eol=lf` for the
-paths that run on the device; check with `tr -cd '\r' < file | wc -c` before
-believing a script that "should work".
+paths that run on the device, and `test-line-endings.sh` fails if a device script
+is either already carrying CR or not covered by the rule. Run it after adding any
+script that reaches the device: pinning by directory missed an extensionless
+script the same day the rule was written, and the check found it.
 
 **A slow link with clean error counters is the cable.** An `eth0` that needs
 minutes to report carrier looks like a driver fault, and the kernel says
@@ -55,12 +58,90 @@ dangling target, a scenario harness that stubs a shell function while the code
 calls an absolute path. `slots/test-mutation.sh` exists because of this — it
 breaks the init on purpose and fails if the checks do not notice.
 
+**A background loop in an init script holds your ssh session open.** `( ... ) &`
+inherits the calling shell's stdout, so a child that never exits keeps the file
+descriptor open and the ssh command never returns. Started by `init` at boot
+this is invisible; started by hand to test it looks like a hung board. Redirect
+the subshell: `( ... ) < /dev/null > /dev/null 2>&1 &`. `slots/device/S00awatchdog`
+and `oled/S97oled-nudge` both do, and `build/README.md` records the same trap for
+`S95nanokvm`, which needs `setsid` because it is the server being backgrounded.
+
+**`./build <project>` compiles the SDK's components, not this repository's.**
+`support/sg2002/additional/` holds patched copies of `kvm`, `kvm_mmf` and
+`vision`, and `support/sg2002/build update_lib` is what copies them into
+`~/MaixCDK/components`. Without that step an edit under `additional/` is simply
+not compiled, and the build still reports success - `kvm_system` even prints
+`Ignore component kvm_mmf` while doing it. Run `update_lib` first, then confirm
+the change reached the compiler:
+
+```shell
+./build update_lib                      # note: it exits 1 on success
+grep -c pthread ~/MaixCDK/components/kvm_mmf/src/kvm_mmf.cpp
+./build kvm_vision                      # builds libkvm.so and libkvm_mmf.so
+```
+
+`kvm_vision` is the target that builds the capture library; the project lives in
+`kvm_vision_test/`. `kvm_system` does not compile `kvm_mmf` at all.
+
+**The committed `dl_lib` prebuilts are older than the committed sources.** A
+build from the current tree produces a `libkvm_mmf.so` that exports one function
+more than the shipped copy (`mmf_vi_frame_release`), and a `libkvm.so` 200KB
+smaller. So replacing a prebuilt brings in every source change since it was
+built, not only yours. Compare exported symbols before swapping one in:
+
+```shell
+readelf --dyn-syms -W lib.so | awk 'NR>3 && $5=="GLOBAL" && $7!="UND" {print $8}' | sort -u
+```
+
+Getting those `awk` columns wrong prints nothing and diffs clean, which looks
+like proof of compatibility and is not. The columns are
+`Num Value Size Type Bind Vis Ndx Name`.
+
 **A boot that answers ping and nothing else needs the card out.** `/boot/slot`
 selects the root filesystem and lives on a FAT partition, so changing it needs a
 shell on the board. A slot that mounts and then starts no listener gives you
 neither. `slots/device/S00awatchdog` reverts the marker if the board proves
 unreachable, and an instrumented `rcS` records which script failed. Install both
 in a slot before trying it, not after.
+
+## Boot time
+
+Measured on a Cube running 1.4.3 from a loop slot, with an `rcS` that records
+each script and its exit status to `/bootlog`. Without that log these numbers
+cannot be attributed to anything.
+
+| configuration          | `rcS` | eth0 carrier | reboot to ssh | memory used |
+| ---------------------- | ----- | ------------ | ------------- | ----------- |
+| as the image ships     | 17s   | 21s          | 27s           | 36MB        |
+| without `S25wifimod`   | 13s   | 16s          | 17s           | 31MB        |
+
+`S25wifimod` loads `cfg80211`, `aic8800_bsp`, `aic8800_fdrv` and `8733bs`. On a
+board with no wifi part the chip never powers on:
+
+```
+aicbsp: fail to set AIC_WIFI power state to 1
+rwnx_mod_init, set power on fail!
+```
+
+Only `aic8800_bsp` stays resident, with no users, and no `wlan0` appears. Those
+five seconds also delay `S30eth`, which is why the link trains later. Move the
+script aside rather than delete it, because a board with a wifi part needs it:
+
+```shell
+mv /etc/init.d/S25wifimod /etc/init.d.S25wifimod.disabled
+```
+
+Two smaller costs sit in the same list. `S50ser2net` exits 1 because no serial
+configuration exists, and `S01fs` calls `parted` twice to grow p2 to 8192MB on
+every boot. `kvmapp/system/init.d/S01fs` now tests the partition table first:
+the resize is a no-op once p2 reaches the target, and it cannot succeed at all
+once p3 exists, because p3 starts immediately above p2. Both tests read the
+table rather than a marker file, because a marker in the root filesystem does
+not survive a slot image built from a fresh rootfs.
+
+Do not measure link-up from one boot. On this hardware it is heavy-tailed:
+63 samples on a good cable gave a median of 6s and a maximum of 40s, so a
+single 21s reading is not evidence of a regression.
 
 ## Recovering a board that will not boot
 

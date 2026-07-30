@@ -1,0 +1,164 @@
+#!/bin/sh
+#
+# Boot watchdog for a slot under test. Install as /etc/init.d/S00awatchdog,
+# mode 755, inside the slot image being tried - not on the slot you trust.
+#
+# The problem it solves: /boot/slot lives on the FAT partition of the SD card,
+# so changing it needs a shell on the board. A slot that boots far enough to
+# answer ping but never starts a listener cannot be recovered over the network
+# at all. The card has to come out. This script gives the board one chance to
+# prove it is reachable, and puts the marker back if it is not.
+#
+# The name sorts before S00kmod, so the watchdog arms before anything else in
+# the rc sequence can fail.
+#
+# Environment, for tests and for dry runs on a live board:
+#   BOOT               where the marker lives            (default /boot)
+#   WATCHDOG_LOG       where decisions are recorded      (default /watchdog.log)
+#   WATCHDOG_DEADLINE  seconds to wait for a way in      (default 300)
+#   WATCHDOG_DRY_RUN=1 log the decision, change nothing
+
+BOOT=${BOOT:-/boot}
+LOG=${WATCHDOG_LOG:-/watchdog.log}
+DEADLINE=${WATCHDOG_DEADLINE:-300}
+INTERVAL=${WATCHDOG_INTERVAL:-10}
+
+# /var/log is a symlink into tmpfs, so a boot that never finishes leaves nothing
+# behind there. The root filesystem is an image on p2 and does survive a power
+# cut, which is the only reason the cause of a failed boot can be read later.
+log() {
+    echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  $*" >> "$LOG"
+    sync
+}
+
+# Probes. Kept out of the extracted blocks below so the test can replace them.
+
+net_up() {
+    [ "$(cat /sys/class/net/eth0/carrier 2>/dev/null)" = "1" ] || return 1
+    ip -4 addr show eth0 2>/dev/null | grep -q 'inet '
+}
+
+# A 401 counts. A server that demands a token has started, bound its port and
+# read its config, and the browser can still reach it to log in.
+web_up() {
+    for url in http://127.0.0.1/ https://127.0.0.1/; do
+        code=$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null)
+        case "$code" in
+            2??|3??|401) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+ssh_up() {
+    pidof sshd > /dev/null 2>&1
+}
+
+# S01fs is what mounts /boot. If the boot failed before that, the marker has to
+# be reached directly, or the write would land in the root filesystem image and
+# change nothing that the next boot reads.
+ensure_boot_mounted() {
+    [ "$BOOT" = /boot ] || return 0
+    grep -q ' /boot ' /proc/mounts 2>/dev/null && return 0
+    mkdir -p /boot
+    mount -t vfat /dev/mmcblk0p1 /boot
+}
+
+# --- health check ---
+# The watchdog answers one question: can this board still be reached? Either the
+# web server or sshd is enough, because either one is a way back in, and a slot
+# that has one of them does not need rescuing. Both need an address on eth0, so
+# a board without one is unreachable however healthy its services are.
+#
+# Checking a listener rather than a process matters. A NanoKVM whose server died
+# still runs sshd, and a board that answers ssh but serves nothing is a broken
+# KVM that a person can repair. Only losing both is unrecoverable.
+healthy() {
+    net_up || return 1
+    web_up && return 0
+    ssh_up && return 0
+    return 1
+}
+# --- end health check ---
+
+# --- revert target ---
+# Restore the last slot that proved itself reachable. Two cases fall through to
+# slot A, and both matter:
+#
+#   no recorded good slot   - nothing better is known
+#   the recorded good slot is the one now failing - a slot can boot, record
+#     itself, and break later. Restoring it onto itself would reboot for ever,
+#     which is worse than the dead board this script exists to prevent.
+#
+# Slot A is the stock root filesystem and an absent marker selects it, so it is
+# the one target that always terminates.
+revert() {
+    if [ -f "$BOOT/slot.good" ] && ! cmp -s "$BOOT/slot.good" "$BOOT/slot"; then
+        cp "$BOOT/slot.good" "$BOOT/slot"
+        [ -f "$BOOT/ver.good" ] && cp "$BOOT/ver.good" "$BOOT/ver"
+        echo "restored $(cat "$BOOT/slot")"
+    else
+        rm -f "$BOOT/slot"
+        echo "marker removed, next boot is slot A"
+    fi
+}
+# --- end revert target ---
+
+# This script never writes /boot/slot.good. Recording the *running* slot as the
+# fallback sounds helpful and is not: after one healthy boot the fallback names
+# the slot itself, the loop guard in revert() then discards it, and every future
+# failure lands on slot A however many good slots exist.
+#
+# Whoever moves the marker is the one that knows the answer, because the slot it
+# replaces is a slot that was working. So the switch records it:
+#
+#   cp /boot/slot /boot/slot.good        # before overwriting /boot/slot
+#   cp /boot/ver  /boot/ver.good
+#
+# An absent /boot/slot.good is a valid state and means slot A.
+
+start() {
+    (
+        waited=0
+        while [ "$waited" -lt "$DEADLINE" ]; do
+            sleep "$INTERVAL"
+            waited=$((waited + INTERVAL))
+
+            if healthy; then
+                log "reachable after ${waited}s (web=$(web_up && echo up || echo down), ssh=$(ssh_up && echo up || echo down)); standing down"
+                exit 0
+            fi
+        done
+
+        log "no way in after ${DEADLINE}s: net=$(net_up && echo up || echo down), web=$(web_up && echo up || echo down), ssh=$(ssh_up && echo up || echo down)"
+
+        if [ "${WATCHDOG_DRY_RUN:-0}" = "1" ]; then
+            log "dry run: would have reverted"
+            exit 0
+        fi
+
+        ensure_boot_mounted
+        log "$(revert)"
+        sync
+        reboot -f
+    ) &
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop|restart|reload)
+        # Nothing to stop: the watcher exits on its own, either when it finds a
+        # way in or when it has rebooted the board.
+        ;;
+    check)
+        # Report the verdict now, for use by hand on a running board.
+        healthy && echo "reachable (web=$(web_up && echo up || echo down), ssh=$(ssh_up && echo up || echo down))" \
+                || echo "NO WAY IN (net=$(net_up && echo up || echo down), web=$(web_up && echo up || echo down), ssh=$(ssh_up && echo up || echo down))"
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|check}"
+        exit 1
+        ;;
+esac

@@ -162,6 +162,10 @@ const en = {
       mode: 'Mouse mode',
       absolute: 'Absolute mode',
       relative: 'Relative mode',
+      absoluteStalled: 'The target is ignoring the absolute mouse',
+      absoluteStalledDesc:
+        'The target is not collecting absolute mouse reports, so pointer moves are lost. The keyboard is unaffected. Recovering USB often clears it; relative mode uses a different endpoint.',
+      useRelative: 'Switch to relative mode',
       direction: 'Wheel direction',
       scrollUp: 'Scroll up',
       scrollDown: 'Scroll down',
@@ -558,8 +562,10 @@ const en = {
           ready: 'Runtime ready',
           stopped: 'Runtime stopped',
           blockedByMCP: 'External MCP control is active',
-          readyBlockedByMCP: 'The runtime is running, but external MCP currently controls device input.',
-          readyWithoutControl: 'The runtime is running. Grant PicoClaw device control before reconnecting.',
+          readyBlockedByMCP:
+            'The runtime is running, but external MCP currently controls device input.',
+          readyWithoutControl:
+            'The runtime is running. Grant PicoClaw device control before reconnecting.',
           unavailable: 'Runtime unavailable',
           configError: 'Configuration error'
         },

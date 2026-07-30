@@ -31,7 +31,7 @@ func (h *Hid) mouseReports(queue <-chan QueuedReport, relativePath string, absol
 			if err := runCleanup(execute, func() error {
 				return h.writeHID(h.relativeMouseDevice(relativePath), relativeMouseReleaseReport())
 			}); err != nil {
-				log.Errorf("release relative mouse on queue close failed: %s", err)
+				reportWriteFailure("release relative mouse on queue close failed", err)
 			} else if resetRelativeMouse != nil {
 				resetRelativeMouse()
 			}
@@ -40,7 +40,7 @@ func (h *Hid) mouseReports(queue <-chan QueuedReport, relativePath string, absol
 			if err := runCleanup(execute, func() error {
 				return h.writeHID(h.absoluteMouseDevice(absolutePath), absoluteReleaseReport)
 			}); err != nil {
-				log.Errorf("release absolute mouse on queue close failed: %s", err)
+				reportWriteFailure("release absolute mouse on queue close failed", err)
 			} else if resetAbsoluteMouse != nil {
 				resetAbsoluteMouse()
 			}
@@ -53,7 +53,7 @@ func (h *Hid) mouseReports(queue <-chan QueuedReport, relativePath string, absol
 		resetAbsoluteMouse = event.ResetAbsoluteMouse
 
 		cleanupFailure := func(writeErr error) {
-			log.Errorf("mouse HID write failed: %s", writeErr)
+			reportWriteFailure("mouse HID write failed", writeErr)
 			if dropped := drainHIDQueue(queue); dropped > 0 {
 				log.Debugf("dropped %d stale mouse HID reports after write failure", dropped)
 			}
@@ -70,7 +70,7 @@ func (h *Hid) mouseReports(queue <-chan QueuedReport, relativePath string, absol
 				if err := runCleanup(execute, func() error {
 					return h.writeHID(h.relativeMouseDevice(relativePath), relativeMouseReleaseReport())
 				}); err != nil {
-					log.Errorf("release relative mouse after write failure failed: %s", err)
+					reportWriteFailure("release relative mouse after write failure failed", err)
 				} else {
 					relativeButtonsActive = false
 					if resetRelativeMouse != nil {
@@ -87,7 +87,7 @@ func (h *Hid) mouseReports(queue <-chan QueuedReport, relativePath string, absol
 				if err := runCleanup(execute, func() error {
 					return h.writeHID(h.absoluteMouseDevice(absolutePath), releaseReport)
 				}); err != nil {
-					log.Errorf("release absolute mouse after write failure failed: %s", err)
+					reportWriteFailure("release absolute mouse after write failure failed", err)
 				} else {
 					absoluteButtonsActive = false
 					if resetAbsoluteMouse != nil {

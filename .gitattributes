@@ -19,13 +19,13 @@ kvmapp/jpg_stream/*         text eol=lf
 kvmapp/picoclaw/**/*.sh     text eol=lf
 kvmapp/picoclaw/**/*.md     text eol=lf
 kvmapp/picoclaw/**/*.yaml   text eol=lf
-tools/**/*.sh               text eol=lf
-# Device init scripts are named for their boot order and so have no extension.
-# Match the naming convention rather than a directory: the first attempt here
-# matched tools/slots/device/ and missed tools/oled/S97oled-nudge the same day.
-# tools/test-line-endings.sh fails if anything slips through again.
-tools/**/S[0-9][0-9]*       text eol=lf
-tools/slots/device/*        text eol=lf
+# Everything under tools/ is a script a shell has to run, and enumerating them
+# failed four times in one day: first tools/oled/S97oled-nudge (no extension, not
+# in the directory that was matched), then support/sg2002/build, then
+# docker/entrypoint, then tools/deploy/deploy-server. Stop guessing and cover the
+# tree. text=auto still leaves real binaries alone, which matters because
+# tools/nanokvm_update_edid/ has a compiled one committed in it.
+tools/**                    text=auto eol=lf
 tools/slots/*.inc           text eol=lf
 tools/slots/*.its.in        text eol=lf
 *.sh                        text eol=lf

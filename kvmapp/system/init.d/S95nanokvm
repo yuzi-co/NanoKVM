@@ -13,6 +13,13 @@
 # The server sets line buffering for stdout at startup. Without that the C
 # messages wait in libc for the process to exit, and this file collects one
 # line and then nothing. See server/common/libkvm_stdout.go.
+#
+# Empty the file before the copies below, not after them. libkvm prints on some
+# error paths once per frame. A capture pipeline that fails in a loop therefore
+# fills tmpfs, and the copy of /kvmapp/server then has no space for its 36MB. A
+# copy that runs out of space leaves a truncated NanoKVM-Server, and the case
+# starts it anyway. S99vidiag also empties this file, but only while its reader
+# runs, so these cases must not depend on it.
 SERVER_LOG=/tmp/nanokvm-server.log
 
 # now_fps is rewritten whenever the measured frame rate changes, so a
@@ -98,13 +105,14 @@ case "$1" in
     # Start services
     prepare_runtime_state
 
+    # Start each run with an empty file, so the log always describes the server
+    # that is running now. S99vidiag has already copied what it read to /data.
+    : > "$SERVER_LOG"
+
     cp -r /kvmapp/kvm_system /tmp/
     /tmp/kvm_system/kvm_system &
 
     cp -r /kvmapp/server /tmp/
-    # Start each run with an empty file, so the log always describes the server
-    # that is running now. S99vidiag has already copied what it read to /data.
-    : > "$SERVER_LOG"
     /tmp/server/NanoKVM-Server >> "$SERVER_LOG" 2>&1 &
    ;;
 
@@ -118,6 +126,12 @@ case "$1" in
   restart)
     killall kvm_system
     killall NanoKVM-Server
+
+    # Start each run with an empty file, so the log always describes the server
+    # that is running now. The server is stopped, so nothing writes to the file
+    # now, and S99vidiag has already copied what it read to /data.
+    : > "$SERVER_LOG"
+
     rm -r /tmp/kvm_system /tmp/server
 
     prepare_runtime_state
@@ -126,9 +140,6 @@ case "$1" in
     /tmp/kvm_system/kvm_system &
 
     cp -r /kvmapp/server /tmp/
-    # Start each run with an empty file, so the log always describes the server
-    # that is running now. S99vidiag has already copied what it read to /data.
-    : > "$SERVER_LOG"
     /tmp/server/NanoKVM-Server >> "$SERVER_LOG" 2>&1 &
 
     sync

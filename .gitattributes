@@ -50,6 +50,19 @@ server/service/network/scripts/*  text eol=lf
 # renormalising them would rewrite files this repository does not own.
 support/*/build             text eol=lf
 
+# Source that never reaches the device, pinned for the tools that read the
+# working tree instead of the index. gofmt and prettier both count a carriage
+# return as a formatting difference, so a Windows checkout with
+# core.autocrlf=true makes them flag almost everything: 224 of the 249 Go files
+# and all 213 TypeScript files. A formatter that reports every file reports
+# nothing, and a real formatting mistake hides in that noise.
+#
+# The index already holds these as LF, so the rule pins the checkout only. It
+# rewrites no blob, and it moves nothing away from upstream.
+*.go                        text eol=lf
+*.ts                        text eol=lf
+*.tsx                       text eol=lf
+
 # Device payloads that must stay byte-exact.
 *.ko                        binary
 *.so                        binary

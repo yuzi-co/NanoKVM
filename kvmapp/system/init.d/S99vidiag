@@ -93,8 +93,11 @@ keep_line() {
         #
         # These are lifecycle markers and not errors, so the log holds a few of
         # them for each start of the capture pipeline. The probe's own messages
-        # stay out: it prints "Cannot obtain HDMI input" on every pass of a loop
-        # that does not advance, and that loop has no delay.
+        # stay out. It printed "Cannot obtain HDMI input" on every pass of a
+        # loop that did not advance and had no delay; the source now returns
+        # instead, and reports it through debug, which is off unless asked for.
+        # The rule stays because the shipped libkvm.so predates that fix, and
+        # because the line is a disconnected cable either way.
         *'driver destroyed'*) return 0 ;;
         *'restart cam'*)      return 0 ;;
         *'mmf insmod'*)       return 0 ;;

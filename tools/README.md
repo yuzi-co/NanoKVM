@@ -507,3 +507,66 @@ because the failure is over by the time the group leaks.
 
 The open question is unchanged, and it sits one step earlier: why `ResetGrp` or
 `StartGrp` refuses. The reader now records that answer when it happens.
+
+## The driver reload after a crash has never worked
+
+`_mmf_init` counts the video buffer pools in `/proc/cvitek/vb` before it starts.
+A pool that is there already belongs to a server that died, so the pipeline would
+start on another process's state. The code therefore reloads the driver stack:
+
+```c
+int old_pool_cnt = _get_vb_pool_cnt();
+if (old_pool_cnt > 0) {
+    if (_is_module_in_use("soph_vi") == 0) {
+        reinit_soph_vb();
+```
+
+`reinit_soph_vb` removes eleven modules and inserts ten. **It removes none of
+them.** The list omits `soph_vo`, and `soph_vo` depends on both `soph_vpss` and
+`soph_base`. `S00kmod` inserts `soph_vo` at boot and nothing removes it, so the
+two `rmmod` calls that matter always report a module that is in use. Each
+`insmod` that follows then reports a module that is already there.
+
+Read the dependency out of the running kernel:
+
+```shell
+awk '$1=="soph_vpss" || $1=="soph_base" {print $1, "refcount="$3, "dependents="$4}' /proc/modules
+```
+
+```
+soph_vpss refcount=2  dependents=soph_vo,
+soph_base refcount=11 dependents=soph_ive,soph_vc_driver,soph_rgn,soph_vo,...
+```
+
+Measured on the device. Stop the server, and one pool stays behind with no
+process on the board that could own it:
+
+| state | pools in `/proc/cvitek/vb` | `soph_vi` refcount |
+| --- | --- | --- |
+| server running | 2 | 1 |
+| server stopped | **1** | 0 |
+| server started again | 2 | 1 |
+
+The pool that stays is `PoolId(0)`, 4177920 bytes and 3 blocks, at `0x8b300000`.
+Its presence is what arms the reload, and `soph_vi` at refcount 0 is what lets
+the reload past its guard. The server's log then holds the whole failure:
+
+```
+rmmod: can't unload module 'soph_vpss': Resource temporarily unavailable
+insmod: can't insert '/mnt/system/ko/soph_base.ko': File exists
+```
+
+`_mmf_init` runs twice for each server start, so the board makes this attempt
+twice and fails twice. The leak does not grow: it stays at one pool however many
+times the server restarts, so it is not a path to running out of memory. Only a
+reboot clears it.
+
+**What this does not prove.** A stale pool at init is a good candidate for the
+`ResetGrp` and `StartGrp` failures, and it fits an intermittent fault that a
+reboot always clears. It is not yet evidence. A hard kill of the server leaves
+the pool behind and the next start still succeeded when it was tried.
+
+The repair does not need a new `libkvm`. `S95nanokvm` runs before the server and
+can reload the stack itself, with `soph_vo` removed first and inserted again in
+the order `S00kmod` uses. That change belongs to the boot path and to the video
+path at once, so measure the fault first and change it second.

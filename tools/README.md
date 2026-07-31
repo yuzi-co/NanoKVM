@@ -313,7 +313,7 @@ a separate partition, so the record survives a reboot.
 | stops after | 200 lines for each source in one boot, and says so in the log |
 | empties the server log at | 128KB |
 | control | `/etc/init.d/S99vidiag` with `start`, `stop` or `restart` |
-| test | `tools/vidiag/test-vidiag.sh` |
+| tests | `tools/vidiag/test-vidiag.sh`, `tools/vidiag/test-restart-space.sh` |
 
 ### The two sources report different halves of the failure
 
@@ -360,13 +360,47 @@ they rotate every other line out of it. Recording them would also make a hot fil
 on the boot medium.
 
 The reader empties the server's log at 128KB. tmpfs holds 80MB, and a server
-restart copies 36MB of `/kvmapp/server` into it. If the log fills tmpfs, the next
-restart stops. That fault is worse than the one under investigation.
+restart copies 36MB of `/kvmapp/server` into it. `libkvm` prints on some error
+paths once per frame, so a pipeline that fails in a loop fills tmpfs. That fault
+is worse than the one under investigation.
 
 The reader starts with a sweep of each source, because this script runs last in
 the boot order and the drivers load first. The sweep repeats if you restart the
 reader by hand, so it writes a header first. A repeated line under that header is
 the reader reading the file again, not the fault happening again.
+
+### The trim stops when the reader stops, so the restart order matters
+
+The trim above runs inside the reader's loop. If the reader stops, nothing
+empties the file, and `S95nanokvm` must not depend on it.
+
+`S95nanokvm` used to empty the log after it copied `/kvmapp/server` into tmpfs.
+That order leaves no margin. Removing `/tmp/server` returns exactly the space
+that copying it back needs, so the copy succeeds only while nothing else writes
+to `/tmp`.
+
+`tools/vidiag/spacetest.sh` replays the restart case on a tmpfs of the device's
+size, with the device's own directory sizes. Run it under Docker:
+
+```shell
+docker run --rm --tmpfs /t:rw,size=80892k -v "$PWD/tools/vidiag:/s:ro" \
+    busybox sh /s/spacetest.sh /t
+```
+
+| order | during the copy | the binary the case starts |
+| --- | --- | --- |
+| empty after the copies | nothing else writes | 36236K of 36236K |
+| empty after the copies | syslogd writes 256KB | 35980K of 36236K |
+| empty before the copies | syslogd writes 256KB | 36236K of 36236K |
+
+The second row is the case the device meets. `/var/log` is a symlink to `/tmp`,
+so syslogd writes there for the whole restart, and the same driver errors flood
+it. `cp` then reports `No space left on device`, the case starts a binary that is
+256KB short, and the KVM stays down until an operator logs in.
+
+`S95nanokvm` now empties the log before the first copy. The flood's space returns
+before anything asks for it, and the margin is 42MB instead of zero.
+`tools/vidiag/test-restart-space.sh` checks that order in both cases.
 
 ### What the first sweep found, and what it did not
 

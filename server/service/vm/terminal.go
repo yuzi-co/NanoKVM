@@ -55,7 +55,25 @@ func (s *Service) Terminal(c *gin.Context) {
 		_ = cmd.Wait()
 	}()
 
-	go wsWrite(ws, ptmx)
+	runTerminal(ws, ptmx)
+}
+
+// runTerminal pumps the session in both directions and returns once either
+// direction has ended, which lets the caller run its teardown.
+//
+// Close the socket when the writer stops. wsRead sets no read deadline, so it
+// returns only when the socket fails, and a client that has stopped reading
+// keeps its connection open while it sends nothing. The writer gives up on its
+// own deadline, the reader waits for a message that is never coming, and the
+// pty and the /bin/sh behind it outlive the session that owned them. Closing
+// here is what makes the reader return. The h264 writer closes for the same
+// reason; see service/stream/direct/client.go.
+func runTerminal(ws *websocket.Conn, ptmx *os.File) {
+	go func() {
+		wsWrite(ws, ptmx)
+		_ = ws.Close()
+	}()
+
 	wsRead(ws, ptmx)
 }
 

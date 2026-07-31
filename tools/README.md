@@ -291,3 +291,63 @@ A bad one takes out both slots at once, and this enclosure exposes no recovery
 control, so the only way back is the SD card in a reader. Measure a real peak
 first, across a reboot, a resolution change and every video mode, and treat the
 change as one that needs the case open if it goes wrong.
+
+## The video pipeline's errors now survive a reboot
+
+The capture pipeline fails to start sometimes, and the failure repairs itself on
+the next attempt. Every earlier attempt to explain it worked from no error code
+at all, for two reasons:
+
+- `/var/log` is a symlink to `/tmp`. Each reboot destroys the log.
+- The server sends its own standard output to `/dev/null`, so every `SAMPLE_PRT`
+  line from `libkvm` is discarded as it is written.
+
+The middleware also logs through syslog, and those lines do carry the failing
+function and the error code. `S99vidiag` copies the useful ones to
+`/data/kvm-diag/vi-errors.log`. `/data` is a separate partition, so the record
+survives a reboot.
+
+| what | value |
+| --- | --- |
+| log | `/data/kvm-diag/vi-errors.log`, one older generation kept |
+| rotates at | 256KB |
+| stops after | 200 lines in one boot, and says so in the log |
+| control | `/etc/init.d/S99vidiag` with `start`, `stop` or `restart` |
+| test | `tools/vidiag/test-vidiag.sh` |
+
+The script keeps every `[VPSS-ERR]`, `[VI-ERR]`, `[SYS-ERR]` and `[VENC-ERR]`
+line, and every `base_mod_jobs` line from the kernel. It is deliberately not a
+list of the calls we expect to fail: nobody knows which call fails, and a list of
+guesses would drop the one line that matters.
+
+It removes the per-frame errors first. `CVI_VPSS_GetChnFrame` fails once a second
+for as long as a viewer is connected to a target whose display is asleep, and it
+matched 62 times in one boot of a healthy board. Recording that would make a hot
+file on the boot medium.
+
+The reader starts with a sweep of what is already in the syslog, because this
+script runs last in the boot order and the drivers load first. The sweep repeats
+if you restart the reader by hand, so it writes a header first. A repeated line
+under that header is the reader reading the file again, not the fault happening
+again.
+
+### What the first sweep found
+
+The HDMI receiver does not answer on I2C when capture starts:
+
+```
+[VI-ERR] lt6911_sensor_ctl.c:136:lt6911_write_register(): I2C_WRITE error!
+[VI-ERR] lt6911_sensor_ctl.c:85:lt6911_read_register(): I2C_WRITE error!
+[VI-ERR] lt6911_sensor_ctl.c:214:lt6911_probe(): read sensor id error.
+[VI-ERR] lt6911_sensor_ctl.c:222:lt6911_probe(): Sensor ID Mismatch! Use the wrong sensor??
+[VI-ERR] cvi_vi.c:101:CHECK_VI_CTX_NULL_PTR(): Call SetDevAttr first
+```
+
+The driver tries three times, fails to read the chip identifier, and reports a
+mismatch. This repeats at each capture start.
+
+**This is not established as the cause.** Capture works on this board: the same
+boot delivers 1920x1080 at 28fps. The value of the lines is that they are the
+first hard evidence upstream of the VI init failure, and that nothing else in the
+system reports them. Do not write them into a code comment as an explanation -
+that mistake has already been made once here with the RTOS messages.

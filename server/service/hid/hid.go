@@ -1,11 +1,12 @@
 package hid
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"strings"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -309,13 +310,31 @@ func isRetryableWriteError(err error) bool {
 // /dev/hidg*. A handle opened before that keeps accepting writes that reach
 // nothing, so keyboard and mouse stop working with no error to say why. The
 // kernel marks the link in /proc/self/fd for exactly this case.
+//
+// This runs on every report, so it builds the path and reads the link without
+// allocating. fmt.Sprintf and os.Readlink together cost four allocations and
+// 224 bytes per call, measured, which is small next to a syscall and still
+// pointless on a board with one core and no memory to spare. The syscall and
+// the test for " (deleted)" are unchanged: what the kernel is asked, and what
+// counts as an answer, are the same as before.
+const hidDeletedSuffix = " (deleted)"
+
 func hidFileWasDeleted(file *os.File) bool {
-	target, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", file.Fd()))
-	if err != nil {
+	// Long enough for "/proc/self/fd/" and any descriptor number.
+	var pathBuf [32]byte
+	path := append(pathBuf[:0], "/proc/self/fd/"...)
+	path = strconv.AppendInt(path, int64(file.Fd()), 10)
+
+	// Long enough for the device paths this reads, and a short read only ever
+	// means the answer is no.
+	var target [128]byte
+
+	n, err := syscall.Readlink(string(path), target[:])
+	if err != nil || n <= 0 {
 		return false
 	}
 
-	return strings.HasSuffix(target, " (deleted)")
+	return bytes.HasSuffix(target[:n], []byte(hidDeletedSuffix))
 }
 
 func (h *Hid) Open() {

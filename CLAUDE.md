@@ -144,11 +144,20 @@ cross-compile needs nothing extra; rebuilding them from `support/sg2002` is only
 changing `kvm_vision`. The executable's RPATH must be patched to `$ORIGIN/dl_lib` after linking —
 a build that skips `patchelf` will not start on the device, and `make app` does not run it.
 
-Linking prints `libopencv_video.so.409, needed by dl_lib/libkvm.so, not found (try using -rpath or
--rpath-link)`. This is expected: `libkvm.so` links against five OpenCV libraries, and only four of
-them ship in `dl_lib` — `libopencv_video.so.409` lives in the device rootfs at `/usr/lib`, which the
-cross-linker has no view of. The warning does not affect the output; the executable records only
-`libkvm.so` and `libc.so` as its own `NEEDED` entries.
+The committed `libkvm.so` records `$ORIGIN` as its `RUNPATH`. The cross-linker needs that entry to
+find the other libraries in `dl_lib`. MaixCDK writes an absolute build directory into the `RPATH`
+instead, and it omits `$ORIGIN`. A library that keeps the MaixCDK search path does not link: the
+linker reports every dependency as `not found`, then it stops with undefined references to the
+`cv::` and `mmf_` symbols. If you rebuild `libkvm.so`, set the search path by hand:
+
+```shell
+patchelf --set-rpath '$ORIGIN' libkvm.so
+```
+
+The device loader does not need this step. The loader searches the `RPATH` of `NanoKVM-Server`,
+which is `$ORIGIN/dl_lib`, for every library in the chain. Only the cross-linker needs the change.
+
+The executable records `libkvm.so` and `libc.so` as its own `NEEDED` entries.
 
 **Video has three delivery paths**, all under `service/stream/`: `mjpeg`, `webrtc` (H.264 over
 WebRTC, with STUN/TURN configured in `server.yaml`), and `direct` (H.264 over plain HTTP). Capture is

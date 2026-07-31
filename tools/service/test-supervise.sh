@@ -2,10 +2,11 @@
 # Exercise the supervisor's decisions, taken straight out of the script that
 # ships so the test cannot drift from it.
 #
-#   test-supervise.sh [path-to-S98supervise]
+#   test-supervise.sh [path-to-S98supervise] [path-to-S95nanokvm]
 #
 # Not destructive: nothing is started or killed. The probes are stubbed.
 SV=${1:-$(dirname "$0")/S98supervise}
+S95=${2:-$(dirname "$0")/../../kvmapp/system/init.d/S95nanokvm}
 [ -f "$SV" ] || { echo "usage: test-supervise.sh <S98supervise>"; exit 1; }
 
 WORK=$(mktemp -d)
@@ -106,6 +107,43 @@ reset_case() {
 reset_case "ran 5 minutes then died, so start over"   300 60 5
 reset_case "died again after 3 seconds, so keep backing off" 3 20 40
 reset_case "died right at the threshold"              60 40 5
+
+echo
+echo "===== a restarted server still reports where libkvm fails ====="
+# The supervisor restarts a crashed server itself, rather than through
+# S95nanokvm, because a full restart copies 36MB back into tmpfs for nothing.
+# That shortcut has to carry the redirection with it.
+#
+# libkvm reports a capture pipeline that does not start with printf, and that
+# output is the only record of the failure. A server started with its output on
+# /dev/null is a server nobody can debug, and a crash is when the record matters
+# most. S99vidiag would go on reading a file that nothing writes to, and the
+# file would still be there, so nothing would look wrong.
+if grep -q '"\$SERVER_BIN" < /dev/null >> "\$SERVER_LOG" 2>&1 &' "$SV"; then
+    note "the crash restart sends the server's output to the log" OK
+else
+    note "the crash restart discards the server's output" FAIL
+fi
+
+# One path, spelled in two scripts, drifts. S99vidiag reads one file, so a
+# second spelling here means the collector follows a file nobody writes.
+sv_log=$(sed -n 's/^SERVER_LOG=\(.*\)$/\1/p' "$SV")
+s95_log=$(sed -n 's/^SERVER_LOG=\(.*\)$/\1/p' "$S95")
+if [ -z "$sv_log" ]; then
+    note "the supervisor never names the log" FAIL
+elif [ "$sv_log" = "$s95_log" ]; then
+    note "both scripts name $sv_log" OK
+else
+    note "the supervisor says $sv_log, S95nanokvm says $s95_log" FAIL
+fi
+
+# kvm_system drives the OLED. It prints nothing anybody reads, and pointing it
+# at the server's log would mix two programs into one record.
+if grep -q '"\$SYSTEM_BIN" < /dev/null > /dev/null 2>&1 &' "$SV"; then
+    note "kvm_system keeps its output on /dev/null" OK
+else
+    note "kvm_system no longer starts the way it did" FAIL
+fi
 
 echo
 echo "===== the script still parses ====="

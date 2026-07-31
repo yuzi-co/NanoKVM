@@ -36,6 +36,18 @@ PIDFILE=/tmp/supervise.pid
 SERVER_BIN=${SERVER_BIN:-/tmp/server/NanoKVM-Server}
 SYSTEM_BIN=${SYSTEM_BIN:-/tmp/kvm_system/kvm_system}
 
+# Where the server's own output goes. This must be the path S95nanokvm uses,
+# because S99vidiag reads that one file. libkvm reports a capture pipeline that
+# does not start with printf, and that output is the only record of the failure.
+# A server this script starts must therefore write to the same place, or the
+# first crash makes the record stop while the file stays where it was.
+#
+# Append, and do not empty the file. S95nanokvm empties it, because a restart
+# there replaces everything in /tmp. A crash restart keeps what the dead server
+# said, and what it said last is the most useful part. S99vidiag empties the
+# file when it passes 128KB.
+SERVER_LOG=/tmp/nanokvm-server.log
+
 # /data survives a reboot, which matters: the reason a board restarted itself is
 # worth having after the fact, and /var/log is a symlink into tmpfs.
 log() {
@@ -227,7 +239,7 @@ watch_loop() {
                 # Check again: a restart in progress may have started it while
                 # this was waiting.
                 if [ "$(action)" = restart ]; then
-                    "$SERVER_BIN" < /dev/null > /dev/null 2>&1 &
+                    "$SERVER_BIN" < /dev/null >> "$SERVER_LOG" 2>&1 &
                     log "started $SERVER_BIN as pid $!"
                 fi
 

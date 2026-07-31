@@ -414,6 +414,47 @@ it. `cp` then reports `No space left on device`, the case starts a binary that i
 before anything asks for it, and the margin is 42MB instead of zero.
 `tools/vidiag/test-restart-space.sh` checks that order in both cases.
 
+### The pipeline's runtime state does not belong on the boot medium
+
+Two files under `/kvmapp/kvm` change while the board runs, and no person asks
+for either one:
+
+| File | Writer | When |
+| --- | --- | --- |
+| `now_fps` | the server | whenever the measured frame rate changes |
+| `state` | libkvm | on every change of HDMI presence |
+
+`/kvmapp` is the boot SD card. `state` is the worse of the two, because libkvm
+writes it with a shell from inside its frame read: `system("echo 1 >
+/kvmapp/kvm/state")`, with the capture mutex held while it forks. A source that
+comes and goes writes to the card on its own, at whatever rate it flaps.
+
+Measure before you act on this. On an idle board the rate is very low: `state`
+did not change once in 600 seconds of sampling, and `/proc/diskstats` reported
+**0 sectors written in 60 seconds** and 6MB total in 4.2 hours of uptime. The
+mechanism is the hazard, not the current rate.
+
+`prepare_runtime_state` in `S95nanokvm` points both names at `/tmp/kvm` and
+leaves a symlink behind, so the readers keep the path they already use and
+nothing needs rebuilding. Neither value means anything after a reboot, and
+`kvm_system` writes `0` into `state` at startup anyway.
+
+`tools/vidiag/test-runtime-state.sh` runs the shipped function against a fake
+root and checks the result. Run it under Linux — MSYS on Windows copies instead
+of linking, and the test says so rather than reporting a failure the device
+would never have:
+
+```shell
+docker run --rm -v "$PWD:/repo" -w /repo busybox sh tools/vidiag/test-runtime-state.sh
+```
+
+`width` and `height` have the same problem and are **not** changed. libkvm
+writes them through `write_res_to_file`, which adds a `system("sync")` — a
+global flush, on the boot medium, forked from the capture path. They are left
+alone because both are read at startup to recover the last known resolution, so
+moving them changes what the board does on its first frame after a reboot. That
+wants its own measurement first.
+
 ### What the first sweep found, and what it did not
 
 The reader recorded two events. Both are server restarts that the operator

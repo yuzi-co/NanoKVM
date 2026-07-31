@@ -74,14 +74,34 @@ stop_services() {
 # kvm_system does not check the result of fopen before seeking on it, so a
 # missing file crashes it. The target is created here, before anything reads
 # it, and refreshed on restart in case tmpfs was cleared underneath us.
+#
+# state is the same shape of file. libkvm writes it from inside its frame read,
+# with a shell, on every change of HDMI presence: "echo 1 > /kvmapp/kvm/state"
+# when it starts getting frames and 0 when it stops. A source that comes and
+# goes therefore writes to the boot medium on its own, with no user in the loop,
+# and holds the capture mutex while it forks. The value describes this moment
+# and means nothing after a reboot. kvm_system writes 0 into it at startup
+# anyway, so tmpfs loses nothing.
+#
+# link_runtime_file points one of these names at tmpfs. It replaces a regular
+# file with the link, so a board that has been running the old layout is
+# converted on the next start.
+link_runtime_file() {
+    name=$1
+
+    [ -e "/tmp/kvm/$name" ] || echo 0 > "/tmp/kvm/$name"
+
+    if [ ! -L "/kvmapp/kvm/$name" ]; then
+        rm -f "/kvmapp/kvm/$name"
+        ln -s "/tmp/kvm/$name" "/kvmapp/kvm/$name"
+    fi
+}
+
 prepare_runtime_state() {
     mkdir -p /tmp/kvm
-    [ -e /tmp/kvm/now_fps ] || echo 0 > /tmp/kvm/now_fps
 
-    if [ ! -L /kvmapp/kvm/now_fps ]; then
-        rm -f /kvmapp/kvm/now_fps
-        ln -s /tmp/kvm/now_fps /kvmapp/kvm/now_fps
-    fi
+    link_runtime_file now_fps
+    link_runtime_file state
 }
 
 start_services() {

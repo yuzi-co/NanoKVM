@@ -385,6 +385,17 @@ device. Each event has the same shape:
 The driver tries three times, fails to read the chip identifier, and reports a
 mismatch. Capture then works: the same boot delivers 1920x1080 at 28fps.
 
+The teardown that runs before each attempt fails as well:
+
+```
+[LOG-ERR] sample_common_vi.c:714:SAMPLE_COMM_VI_StopViChn(): CVI_VI_DisableChn failed with 0xc00e8007!
+[LOG-ERR] sample_common_vi.c:948:SAMPLE_COMM_VI_StopSingleViPipe(): CVI_VI_StopPipe failed with 0xc00e8007!
+[LOG-ERR] sample_common_vi.c:606:SAMPLE_COMM_VI_StopDev(): CVI_VI_DisableDev failed with 0xc00e8007!
+```
+
+The `CVI_` rule found these. The filter has no rule for the `[LOG-ERR]` tag, so
+a keep-list built from the tags alone would have dropped them.
+
 **This is the signature of a start that succeeds. It is not the fault.** An
 earlier revision of this file offered these lines as the first evidence upstream
 of the VI init failure. That reading was wrong. The record holds no `[VPSS-ERR]`

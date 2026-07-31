@@ -1,0 +1,180 @@
+#!/bin/sh
+# Keep the video pipeline's init and teardown errors across a reboot.
+#
+# The capture pipeline fails to start sometimes. The failure heals itself on the
+# next attempt, so the only trace it leaves is an error line, and that line does
+# not survive: /var/log is a symlink to /tmp, and the server sends its own
+# standard output to /dev/null. Every earlier attempt to explain the fault had
+# no error code to work from.
+#
+# This script copies the few lines that matter to /data, which is a separate
+# partition and survives a reboot. It writes nothing while the pipeline is
+# healthy.
+#
+# The script starts a background reader and returns. If the reader stops, the
+# KVM is unaffected. Nothing here is in the path of the video service.
+
+LOG_DIR=/data/kvm-diag
+LOG="$LOG_DIR/vi-errors.log"
+SOURCE=/var/log/messages
+PIDFILE=/tmp/vidiag.pid
+
+# Stop after this many lines in one boot. A fault that repeats forever must not
+# turn the SD card into a hot file. The cap is recorded in the log when it is
+# reached, so a truncated record never reads as a complete one.
+MAX_LINES=200
+
+# Rotate at this size. One generation is kept.
+MAX_BYTES=262144
+
+# --- filter ---
+# keep_line decides whether a syslog line earns a write to the SD card.
+#
+# The rule keeps every error the video drivers report, and then removes the
+# per-frame ones. It is deliberately not a list of the calls we expect to fail:
+# we do not know which call fails, and a list of guesses would drop the one line
+# the investigation needs.
+#
+# The exclusion comes first and is load-bearing. CVI_VPSS_GetChnFrame fails once
+# a second for as long as a viewer is connected to a target whose display is
+# asleep - it matched 62 times in one boot of a healthy board. Those lines are
+# understood, and recording them would make a hot file on the boot medium.
+keep_line() {
+    case "$1" in
+        *GetChnFrame*|*ReleaseChnFrame*|*SendFrame*) return 1 ;;
+        *base_mod_jobs*)   return 0 ;;
+        *'[VPSS-ERR]'*)    return 0 ;;
+        *'[VI-ERR]'*)      return 0 ;;
+        *'[SYS-ERR]'*)     return 0 ;;
+        *'[VENC-ERR]'*)    return 0 ;;
+        *_mmf_vpss_init_new*)   return 0 ;;
+        *_mmf_vpss_deinit_new*) return 0 ;;
+        *mmf_vi_init*)          return 0 ;;
+        *)                 return 1 ;;
+    esac
+}
+# --- end filter ---
+
+# --- record ---
+# record_line writes one kept line and enforces the per-boot cap. It reads and
+# updates "kept", and it writes to the file named by LOG.
+#
+# The cap exists for the SD card, not for the log's size. A pipeline that fails
+# in a loop would otherwise write to the card for as long as the board stays up.
+# The cap announces itself in the log, because a record that stops silently
+# reads exactly like a fault that stopped.
+record_line() {
+    kept=$((kept + 1))
+    if [ "$kept" -gt "$MAX_LINES" ]; then
+        if [ "$kept" -eq $((MAX_LINES + 1)) ]; then
+            printf '=== cap reached: stopped after %s lines this boot ===\n' \
+                "$MAX_LINES" >> "$LOG"
+        fi
+        return 0
+    fi
+    printf '%s\n' "$1" >> "$LOG"
+}
+# --- end record ---
+
+rotate_if_large() {
+    # Check for the file first. "wc -c < $LOG" fails in the shell, not in wc,
+    # when the file is absent, so the redirection on wc never suppressed the
+    # message and a first run always printed an error it had no reason to.
+    [ -f "$LOG" ] || return 0
+
+    size=$(wc -c < "$LOG" 2>/dev/null) || return 0
+    [ -n "$size" ] || return 0
+    if [ "$size" -gt "$MAX_BYTES" ]; then
+        mv "$LOG" "$LOG.1" 2>/dev/null
+    fi
+}
+
+collect() {
+    # Create the directory again here. /data is exfat, and the first write lost
+    # a race with the mkdir in start(): the background reader opened the log
+    # before the new directory was visible to it, and the boot marker was lost.
+    mkdir -p "$LOG_DIR" 2>/dev/null
+
+    # The clock is often wrong before NTP runs, so record the uptime as well.
+    # It is the only value that orders the boots reliably.
+    printf '=== boot %s uptime %ss ===\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" \
+        "$(cut -d. -f1 /proc/uptime 2>/dev/null)" >> "$LOG"
+
+    kept=0
+
+    # Sweep what is already in the log before following it. This script runs
+    # last in the boot order, and the drivers load first, so an error from
+    # module load is in the file before the reader exists. The sweep is the only
+    # way to see it.
+    #
+    # The sweep repeats on a manual restart, so its output carries a header. A
+    # repeated line under that header is this script reading the file again, not
+    # the fault happening again, and the two must never be confusable.
+    if [ -f "$SOURCE" ]; then
+        printf -- '--- log contents at reader start ---\n' >> "$LOG"
+        while read -r line; do
+            keep_line "$line" || continue
+            record_line "$line"
+        done < "$SOURCE"
+        printf -- '--- following new lines ---\n' >> "$LOG"
+    fi
+
+    # -n 0 because tail prints the last ten lines by default, and those have
+    # just been swept. Without it every restart records the same errors twice.
+    tail -n 0 -F "$SOURCE" 2>/dev/null | while read -r line; do
+        keep_line "$line" || continue
+        record_line "$line"
+    done
+}
+
+start() {
+    # Refuse rather than write to the root filesystem. If /data is not mounted,
+    # creating the directory would put the log on the boot medium instead.
+    grep -q ' /data ' /proc/mounts 2>/dev/null || {
+        echo "vidiag: /data is not mounted, not collecting"
+        return 0
+    }
+
+    mkdir -p "$LOG_DIR" 2>/dev/null || return 0
+    rotate_if_large
+
+    # Detach the reader completely: its own session, and none of the caller's
+    # three standard descriptors. A reader that keeps any of them holds the
+    # caller's channel open, and an ssh command that starts this script never
+    # returns. The log lines do not travel that way - collect() appends to the
+    # file directly.
+    #
+    # setsid also gives the reader a process group of its own, which is what
+    # stop() needs. The reader is a pipeline, so killing the recorded process
+    # leaves the tail behind; killing the group takes both.
+    setsid "$0" __collect </dev/null >/dev/null 2>&1 &
+    echo $! > "$PIDFILE"
+    echo "vidiag: collecting to $LOG"
+}
+
+stop() {
+    [ -f "$PIDFILE" ] || return 0
+    pid=$(cat "$PIDFILE")
+    rm -f "$PIDFILE"
+    [ -n "$pid" ] || return 0
+
+    # Kill the group, not the process. setsid made the reader a session leader,
+    # so its process group id equals its process id, and the negative form
+    # reaches the tail as well. Killing the process alone leaves the tail
+    # running: that orphan then holds the descriptors of whatever shell started
+    # it, and a second reader appends the same lines twice.
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+    return 0
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    # Internal. start() re-runs the script this way through setsid.
+    __collect) collect ;;
+    restart | reload) stop; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+
+exit 0

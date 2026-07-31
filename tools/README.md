@@ -449,3 +449,61 @@ from `CreateGrp`, `ResetGrp` or `StartGrp`, so the intermittent failure did not
 happen while the reader ran. Do not write these lines into a code comment as an
 explanation - that mistake has already been made once here with the RTOS
 messages.
+
+### The summary line carries no error code. Read the line above it.
+
+`mmf_vi_init` prints `_mmf_vpss_init_new failed. s32Ret: 0x%x !` when the
+pipeline does not start. That value is always `0xffffffff`.
+`_mmf_vpss_init_new` returns `CVI_FAILURE` from each of its three failure paths,
+so the compiler folds the constant into the call. Disassemble the shipped
+library, and the instruction before the `printf` is `li a1,-1`:
+
+```shell
+docker run --rm -v "$PWD/server/dl_lib:/w:ro" ubuntu:24.04 sh -c \
+  'apt-get update -qq && apt-get install -y -qq binutils-riscv64-linux-gnu \
+   && riscv64-linux-gnu-objdump -d /w/libkvm_mmf.so | sed -n "/_Z11mmf_vi_initv/,/ret/p"'
+```
+
+The driver's own code arrives one line earlier, from the `SAMPLE_PRT` calls
+inside `_mmf_vpss_init_new`:
+
+```
+CVI_VPSS_CreateGrp(grp:0) retry(0xc0068003)!
+CVI_VPSS_ResetGrp(grp:0) failed with 0xc0068003!3
+CVI_VPSS_StartGrp failed with 0xc0068003
+```
+
+The filter keeps all three through its `CVI_VPSS_` rule. That rule is what makes
+the record useful, because the line everybody quotes is the empty one.
+
+The codes read as `(module << 16) | (level << 13) | errid`, with level 4 for an
+error. The module numbers are not obvious, so take them from the binary rather
+than from a guess. The `ResetGrp` message passes `CVI_ERR_VPSS_ILLEGAL_PARAM` as
+a literal, and the disassembly shows `0xc0068003`. VPSS is therefore **6**, and
+`errid` 3 is an illegal parameter. VENC is 3 and VI is 14, both read the same way
+from `CVI_VENC_CreateChn ... 0xc0038007` and `CVI_VI_DisableChn ... 0xc00e8007`.
+The `errid` 7 in those two agrees with the syslog line beside them, `Call
+SetDevAttr first`, which reports a call made before its configuration.
+
+One recorded line reads `_mmf_vpss_init_new failed. s32Ret: 0xc0078003 !`. **Do
+not use it.** No build of this source can print anything but `0xffffffff` there,
+and the library on the device has not changed since before that line was
+written. The most likely source is a test build staged under `/tmp` during a
+deploy, which the next reboot removed.
+
+### The leaked VPSS group is real, and it is the repair
+
+`_mmf_vpss_init_new` creates the group, and it returns `CVI_FAILURE` from the
+`ResetGrp` and `StartGrp` paths without destroying it. `mmf_vi_init` then returns
+early and leaves `vi_is_inited` false, so `mmf_vi_deinit` skips the group as
+well. The group stays.
+
+That looks like the fault, and it is the opposite. The next `mmf_vi_init` calls
+`CVI_VPSS_CreateGrp`, the driver answers that the group exists, and the code
+retries: it calls `CVI_VPSS_DestroyGrp`, then it creates the group again. **This
+is the self-repair that the investigation keeps describing.** Destroying the
+group on the error paths would tidy the code. It would not stop the failure,
+because the failure is over by the time the group leaks.
+
+The open question is unchanged, and it sits one step earlier: why `ResetGrp` or
+`StartGrp` refuses. The reader now records that answer when it happens.

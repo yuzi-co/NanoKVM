@@ -85,3 +85,29 @@ func TestWritingToADeletedNodeReopensIt(t *testing.T) {
 		t.Fatalf("device holds %v, want the report", written)
 	}
 }
+
+// The check runs on every report, so it must not allocate its way through the
+// hottest path in the server. fmt.Sprintf and os.Readlink together cost four
+// allocations and 224 bytes per call; building the path in place and reading
+// the link into a stack buffer costs one.
+//
+// The syscall still dominates the time. The point is the garbage, not the
+// clock: this runs about twenty times a second while the mouse moves, and the
+// board has one core and no memory to spare.
+func TestTheDeletionCheckDoesNotAllocatePerReport(t *testing.T) {
+	file, err := os.Create(filepath.Join(t.TempDir(), "hidg0"))
+	if err != nil {
+		t.Fatalf("setup: %s", err)
+	}
+	defer file.Close()
+
+	allocs := testing.AllocsPerRun(200, func() {
+		if hidFileWasDeleted(file) {
+			t.Fatal("a live handle must not be treated as stale")
+		}
+	})
+
+	if allocs > 1 {
+		t.Fatalf("expected at most one allocation per check, got %v", allocs)
+	}
+}

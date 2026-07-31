@@ -45,7 +45,7 @@ var (
 	// and the error that SetHDMI now logs says so on every transition. Making it
 	// real needs a pause that does not dismantle the pipeline - either a new
 	// libkvm entry point, or stopping the encoder while leaving VI up.
-	setCapture = func(on bool) { common.GetKvmVision().SetHDMI(on) }
+	setCapture      = func(on bool) { common.GetKvmVision().SetHDMI(on) }
 	idleTimeout     = func() time.Duration { return time.Duration(utils.GetHDMIIdleTimeout()) * time.Minute }
 	captureDisabled = utils.IsHdmiDisabled
 )

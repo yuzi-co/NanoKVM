@@ -127,6 +127,32 @@ keep_case "a logrus error entry about something else" \
     '2026-07-31 08:00:00 ERRO get hardware version failed' drop
 
 echo
+echo "===== the teardown that precedes a failure must be recorded ====="
+# ~CameraCviMmf ends with mmf_try_deinit(true), which sets the reference count to
+# zero and destroys the media stack for every user at once. Camera::restart calls
+# it, and the resolution probe and the detect thread call Camera::restart while
+# the board runs. A failed init that follows one of those has a cause that the
+# driver's own message does not name, so the record needs the marker as well.
+#
+# These are lifecycle markers, not errors. The log holds a few for each start.
+keep_case "the media stack was destroyed for everyone" \
+    'maix multi-media driver destroyed.' keep
+keep_case "something asked for a camera restart" \
+    '[kvmv] restart cam...' keep
+keep_case "the reload fired, so a stale pool was there" \
+    'mmf insmod..' keep
+
+# The probe prints this on every pass of a loop that does not advance, and the
+# loop body has no delay. Recording it would put an unbounded flood on the SD
+# card, which is the one thing this filter exists to prevent.
+keep_case "the probe cannot read the input, and says so forever" \
+    '[kvmv] Cannot obtain HDMI input' drop
+keep_case "the probe walking its resolution list" \
+    '[kvmv] Trying 1600 * 900 res ..' drop
+keep_case "the probe reporting a healthy pipeline" \
+    '[kvmv] VI subsystem is normal' drop
+
+echo
 echo "===== everything else is ignored ====="
 keep_case "an ordinary syslog line" \
     'Jul 30 20:59:40 nanokvm daemon.info udhcpc[300]: lease of 10.0.0.222 obtained' drop

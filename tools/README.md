@@ -696,6 +696,29 @@ That is the flood the tmpfs guard above exists for, and a cable is enough to
 start it. This one is read from the source. Nothing on this board has been
 observed doing it.
 
+It has a third cost that is worse than either. The detect thread tests
+`try_exit_thread` only at the top of its own loop, and this never returns there,
+so a `kvmv_deinit` that joins the thread waits for a cable to be plugged back
+in.
+
+**The source is fixed and the shipped library is not.** `auto_try_res` now
+returns 2 in this case, which is the answer the caller already handles, and the
+caller waits a second before it looks again — without that the spin moves out of
+`auto_try_res` and into the thread, because that branch has no delay of its own.
+The report drops from `printf` to `debug`, matching the same condition in mode 2;
+`debug_en` is 0 unless someone asks for it.
+
+`server/dl_lib/libkvm.so` is committed prebuilt and was built before this change,
+so the board still runs the old behaviour. The fix reaches a device only after
+`make support`-style rebuild of `kvm_vision`, and the RPATH step in `CLAUDE.md`
+applies to the result:
+
+```shell
+patchelf --set-rpath '$ORIGIN' libkvm.so
+```
+
+Nothing here has been compiled or run. Read the change before you build it.
+
 ### The reader records the teardown as well
 
 `maix multi-media driver destroyed.`, `[kvmv] restart cam...` and `mmf insmod..`

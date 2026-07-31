@@ -437,10 +437,31 @@ uint8_t auto_try_res()
             return 1;
             break;
         case 2:
-            // HDMI not detected or resolution not supported; interval checks will continue
-            printf("[kvmv] Cannot obtain HDMI input\n");
-            auto_trying_times--;
-            break;
+            // Nothing readable on the port. That is not a resolution problem,
+            // so walking the list against it cannot help: return, and let the
+            // detection thread come back later.
+            //
+            // This used to decrement the counter instead, to avoid spending an
+            // attempt on a condition that is not the list's fault. The loop
+            // then sat on the same index for as long as the input stayed
+            // unreadable, and it has no delay: one core pinned, and this printf
+            // repeated as fast as get_vi_state returns, into the tmpfs the
+            // restart path needs 36MB of.
+            //
+            // The counter is uint8_t, so at index 0 the decrement wrapped to
+            // 255 and the loop's increment wrapped it back to 0. There was no
+            // exit from it at all.
+            //
+            // It also blocked shutdown. try_exit_thread is only tested at the
+            // top of the detection thread's own loop, which this never returned
+            // to, so a deinit that joins the thread waited on an unplugged
+            // cable.
+            //
+            // debug rather than printf, matching the same condition in mode 2
+            // below. debug_en is 0 unless someone asks for it, so a disconnected
+            // input costs nothing to report.
+            debug("[kvmv] Cannot obtain HDMI input\n");
+            return 2;
         case 3: // width too small
         case 4: // width too large
         case 5: // height too small
@@ -1326,7 +1347,15 @@ void* vi_subsystem_detection(void * arg)
                     }
                 } else if (try_res == 2) {
                     kvmv_cfg.hdmi_try_rounds = 0;
-                    // Cannot obtain HDMI input / No signal on HDMI
+                    // Cannot obtain HDMI input / No signal on HDMI.
+                    //
+                    // Wait before looking again. auto_try_res now returns as
+                    // soon as it finds the input unreadable, and this branch of
+                    // the thread has no delay of its own, so without this the
+                    // spin that used to live inside auto_try_res would simply
+                    // move out here. One second matches the interval the
+                    // vi_detect_state == 2 branch below already uses.
+                    time::sleep_ms(1000);
                 }
             } else if (kvmv_cfg.vi_detect_state == 2){
                 // Low-frequency detection of HDMI status, no log output

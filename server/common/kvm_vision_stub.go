@@ -33,12 +33,25 @@ func GetKvmVision() *KvmVision {
 	return kvmVision
 }
 
+// One read tracker per encoding, mirroring the real implementation so that the
+// call shape it uses is type-checked by a build that has no libkvm behind it.
+var (
+	mjpegReads captureReadLog
+	h264Reads  captureReadLog
+)
+
 func (k *KvmVision) ReadMjpeg(width uint16, height uint16, quality uint16) (data []byte, result int) {
-	return nil, -1
+	result = -1
+	reportCaptureRead(&mjpegReads, result)
+
+	return nil, result
 }
 
 func (k *KvmVision) ReadH264(width uint16, height uint16, bitRate uint16) (data []byte, result int) {
-	return nil, -1
+	result = -1
+	reportCaptureRead(&h264Reads, result)
+
+	return nil, result
 }
 
 func (k *KvmVision) SetHDMI(enable bool) int {

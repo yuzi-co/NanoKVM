@@ -655,9 +655,26 @@ That is the flood the tmpfs guard above exists for, and a cable is enough to
 start it. This one is read from the source. Nothing on this board has been
 observed doing it.
 
-### What the reader does not record
+### The reader records the teardown as well
 
-The collector keeps none of this. `maix multi-media driver destroyed.`,
-`[kvmv] restart cam...` and `mmf insmod..` carry no `CVI_` name and no error tag,
-so the filter drops all three. When the fault next happens, the record will hold
-the driver's error and not the teardown that came before it.
+`maix multi-media driver destroyed.`, `[kvmv] restart cam...` and `mmf insmod..`
+carry no `CVI_` name and no error tag, so the filter used to drop all three. The
+record then held the driver's error without the teardown that came before it,
+which is the half that names a cause.
+
+The filter keeps them now. They are lifecycle markers rather than errors, so the
+log holds a few for each start of the capture pipeline. Read from the device
+after the change:
+
+```
+server: mmf insmod..
+server: maix multi-media driver destroyed.
+server: mmf insmod..
+```
+
+That is the whole signature in three lines: the reload runs, the stack is
+destroyed for every user, and the reload runs again.
+
+The probe's own messages stay out. `Cannot obtain HDMI input` prints on each pass
+of the loop that does not advance, and `Trying <w> * <h> res ..` prints for every
+mode the probe walks. Neither names a cause, and the first one has no limit.

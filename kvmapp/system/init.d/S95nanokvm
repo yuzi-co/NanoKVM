@@ -1,6 +1,20 @@
 #!/bin/sh
 # nanokvm Rev3.1
 
+# libkvm reports a capture pipeline that does not start with printf, and the
+# server used to send that output nowhere: to the console at boot, and to
+# /dev/null after a scripted restart. Both are lost, so every earlier attempt
+# to explain the intermittent failure had no error code to work from.
+#
+# Send the output to tmpfs instead. S99vidiag follows this file and copies the
+# few lines that matter to /data, which survives a reboot. The path is under
+# /tmp because /kvmapp is the boot SD card.
+#
+# The server sets line buffering for stdout at startup. Without that the C
+# messages wait in libc for the process to exit, and this file collects one
+# line and then nothing. See server/common/libkvm_stdout.go.
+SERVER_LOG=/tmp/nanokvm-server.log
+
 wait_for_exit() {
     process="$1"
     timeout="$2"
@@ -90,7 +104,12 @@ start_services() {
     if ! pidof NanoKVM-Server >/dev/null 2>&1; then
         rm -rf /tmp/server
         cp -r /kvmapp/server /tmp/
-        /tmp/server/NanoKVM-Server &
+
+        # Start each run with an empty file, so the log always describes the
+        # server that is running now. S99vidiag has already copied what it read
+        # to /data.
+        : > "$SERVER_LOG"
+        /tmp/server/NanoKVM-Server >> "$SERVER_LOG" 2>&1 &
     fi
 }
 

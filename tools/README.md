@@ -570,3 +570,94 @@ The repair does not need a new `libkvm`. `S95nanokvm` runs before the server and
 can reload the stack itself, with `soph_vo` removed first and inserted again in
 the order `S00kmod` uses. That change belongs to the boot path and to the video
 path at once, so measure the fault first and change it second.
+
+## Why the media stack is built twice for each server start
+
+The server's log shows `_mmf_init` twice for every start, with a full teardown
+between them:
+
+```
+try release sys ok
+mmf insmod..
+[_mmf_init]-932: maix multi-media version:...
+maix multi-media init ok
+mmf_add_vi_channel..            (three times)
+maix multi-media driver destroyed.
+try release sys ok
+mmf insmod..
+[_mmf_init]-932: maix multi-media version:...
+```
+
+`mmf_init` is reference counted, so a second call normally increments a counter
+and returns. Two real initialisations mean the counter reached zero between them.
+
+`kvm_vision.cpp:1643` calls `cam->restart(...)` while the server starts.
+`Camera::restart` deletes the backend object, and `~CameraCviMmf` ends with
+`mmf_try_deinit(true)`. The argument is `force`:
+
+```c
+if (force) {
+    priv.mmf_used_cnt = 0;      // discard the count
+    _mmf_deinit();              // tear down the stack for every user
+}
+```
+
+**One camera object therefore destroys the whole media stack**, and the reference
+count that exists to prevent this is thrown away. A new backend follows
+immediately, so the stack is built, destroyed and built again.
+
+### The teardown is what arms the reload that cannot work
+
+The section above describes a stale video buffer pool at `_mmf_init`, and the
+reload that tries to clear it. The pool does not come from an earlier server.
+**The server leaves it for itself, seconds earlier, on every start.** The first
+initialisation creates the pool, the forced teardown does not free it, and the
+second initialisation reads it as another process's leftover state.
+
+So both halves happen every time the board starts: a stale pool, and a repair
+that has never worked.
+
+### The same teardown is reachable while the board runs
+
+`cam->restart(...)` has three more call sites, and all of them run after start:
+
+| line | when |
+| --- | --- |
+| `kvm_vision.cpp:459` | the resolution probe, for each mode it tries |
+| `kvm_vision.cpp:1351` | the detect thread, after a manual resolution change |
+| `kvm_vision.cpp:432` | a branch its own comment calls impossible |
+
+Each one destroys the media stack under whatever else is using it. HDMI events
+decide when they run, and HDMI events have no schedule. That matches a fault
+that is rare, that repairs itself, and that nobody can reproduce on demand.
+
+This is a candidate, not a measurement. The board recorded one teardown this
+boot, which is the one at start, and no `restart cam` at all.
+
+### The resolution probe does not advance when the input is unreadable
+
+```c
+for (auto_trying_times = 0; auto_trying_times < sizeof(hdmi_res_list)/4; auto_trying_times++){
+    switch(get_vi_state()){
+    case 2:
+        printf("[kvmv] Cannot obtain HDMI input\n");
+        auto_trying_times--;
+        break;
+```
+
+`auto_trying_times` is a `uint8_t`. The decrement takes 0 to 255, the increment
+returns it to 0, and the loop condition holds. The body has no delay, and it
+prints on each pass. While `get_vi_state` reports an input it cannot read, the
+detect thread holds one core on a board that has one core, and it writes to
+`/tmp/nanokvm-server.log` without a limit.
+
+That is the flood the tmpfs guard above exists for, and a cable is enough to
+start it. This one is read from the source. Nothing on this board has been
+observed doing it.
+
+### What the reader does not record
+
+The collector keeps none of this. `maix multi-media driver destroyed.`,
+`[kvmv] restart cam...` and `mmf insmod..` carry no `CVI_` name and no error tag,
+so the filter drops all three. When the fault next happens, the record will hold
+the driver's error and not the teardown that came before it.

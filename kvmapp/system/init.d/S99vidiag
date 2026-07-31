@@ -19,6 +19,22 @@ LOG="$LOG_DIR/vi-errors.log"
 SOURCE=/var/log/messages
 PIDFILE=/tmp/vidiag.pid
 
+# The server's own output. libkvm reports a capture pipeline that does not
+# start with printf, and the driver never sends those messages to the syslog,
+# so this file is the only place they appear. S95nanokvm creates it.
+SRVLOG=/tmp/nanokvm-server.log
+
+# Mark the lines that came from the server, because they carry no syslog
+# prefix and would otherwise be hard to tell from the driver's own messages.
+SRV_TAG="server: "
+
+# Empty the server's log when it passes this size. See trim_server_log.
+SRV_MAX_BYTES=131072
+
+# Check the size once every this many lines from the server. The check costs a
+# wc, and a flood is the only case that needs it.
+SRV_TRIM_EVERY=200
+
 # Stop after this many lines in one boot. A fault that repeats forever must not
 # turn the SD card into a hot file. The cap is recorded in the log when it is
 # reached, so a truncated record never reads as a complete one.
@@ -41,7 +57,11 @@ MAX_BYTES=262144
 # understood, and recording them would make a hot file on the boot medium.
 keep_line() {
     case "$1" in
+        # The per-frame calls, from either source. The exclusion comes first so
+        # that it wins over the rules below.
         *GetChnFrame*|*ReleaseChnFrame*|*SendFrame*) return 1 ;;
+        *QueryStatus*|*GetStream*|*ReleaseStream*)   return 1 ;;
+
         *base_mod_jobs*)   return 0 ;;
         *'[VPSS-ERR]'*)    return 0 ;;
         *'[VI-ERR]'*)      return 0 ;;
@@ -50,6 +70,18 @@ keep_line() {
         *_mmf_vpss_init_new*)   return 0 ;;
         *_mmf_vpss_deinit_new*) return 0 ;;
         *mmf_vi_init*)          return 0 ;;
+
+        # The server's log carries libkvm's printf output, which has no syslog
+        # tag and no error tag. libkvm prints on its error paths only, so a
+        # named CVI call in that file is a failure report, and it is worth
+        # keeping even when nobody predicted the call. The per-frame calls are
+        # already excluded above.
+        #
+        # This rule keeps the log short as well. The device runs the server
+        # with logger.level "info" and logger.file "stdout", so logrus writes
+        # into the same file, and those entries must not be recorded.
+        *CVI_VI_*|*CVI_VPSS_*|*CVI_VENC_*|*CVI_SYS_*) return 0 ;;
+
         *)                 return 1 ;;
     esac
 }
@@ -76,6 +108,34 @@ record_line() {
 }
 # --- end record ---
 
+# --- trim ---
+# trim_server_log empties the server's log when it grows past SRV_MAX_BYTES.
+# It reports success when it emptied the file, and failure when it did not.
+#
+# tmpfs holds 80MB, and S95nanokvm copies the 36MB of /kvmapp/server into it on
+# every restart. libkvm prints on its error paths, and some of those paths run
+# once per frame, so a pipeline that fails in a loop would fill tmpfs and stop
+# the next restart. A KVM that cannot restart is a worse fault than the one
+# this script investigates.
+#
+# Emptying the file is safe while the server writes to it. S95nanokvm opens the
+# file with O_APPEND, so the next write goes to the start of the file and
+# leaves no gap. tail follows the file through the change.
+#
+# Check for the file first. "wc -c < $SRVLOG" fails in the shell, not in wc, so
+# a redirection on wc does not suppress the message.
+trim_server_log() {
+    [ -f "$SRVLOG" ] || return 1
+
+    size=$(wc -c < "$SRVLOG" 2>/dev/null) || return 1
+    [ -n "$size" ] || return 1
+    [ "$size" -gt "$SRV_MAX_BYTES" ] || return 1
+
+    : > "$SRVLOG"
+    return 0
+}
+# --- end trim ---
+
 rotate_if_large() {
     # Check for the file first. "wc -c < $LOG" fails in the shell, not in wc,
     # when the file is absent, so the redirection on wc never suppressed the
@@ -87,6 +147,44 @@ rotate_if_large() {
     if [ "$size" -gt "$MAX_BYTES" ]; then
         mv "$LOG" "$LOG.1" 2>/dev/null
     fi
+}
+
+# sweep records what a file holds already. This script runs last in the boot
+# order and the drivers load first, so an error from module load is in the file
+# before the reader exists. The sweep is the only way to see it.
+sweep() {
+    src="$1"; tag="$2"
+    [ -f "$src" ] || return 0
+    while read -r line; do
+        keep_line "$line" || continue
+        record_line "$tag$line"
+    done < "$src"
+}
+
+# follow records the lines a file gains from now on.
+#
+# Pass "trim" as the third argument for the server's log, which this script
+# also has to keep inside tmpfs. The count includes the lines the filter drops,
+# because a flood is made of exactly those.
+#
+# tail runs with -n 0 because it prints the last ten lines by default and the
+# sweep has just read them. Without it, a restart records the same errors twice
+# and one fault reads as two. tail also retries a file that does not exist yet,
+# so the server's log does not have to be there when this starts.
+follow() {
+    src="$1"; tag="$2"; guard="$3"
+    seen=0
+    tail -n 0 -F "$src" 2>/dev/null | while read -r line; do
+        if [ "$guard" = trim ]; then
+            seen=$((seen + 1))
+            if [ $((seen % SRV_TRIM_EVERY)) -eq 0 ] && trim_server_log; then
+                printf -- '--- server log passed %s bytes and was emptied ---\n' \
+                    "$SRV_MAX_BYTES" >> "$LOG"
+            fi
+        fi
+        keep_line "$line" || continue
+        record_line "$tag$line"
+    done
 }
 
 collect() {
@@ -103,29 +201,20 @@ collect() {
 
     kept=0
 
-    # Sweep what is already in the log before following it. This script runs
-    # last in the boot order, and the drivers load first, so an error from
-    # module load is in the file before the reader exists. The sweep is the only
-    # way to see it.
-    #
     # The sweep repeats on a manual restart, so its output carries a header. A
     # repeated line under that header is this script reading the file again, not
     # the fault happening again, and the two must never be confusable.
-    if [ -f "$SOURCE" ]; then
-        printf -- '--- log contents at reader start ---\n' >> "$LOG"
-        while read -r line; do
-            keep_line "$line" || continue
-            record_line "$line"
-        done < "$SOURCE"
-        printf -- '--- following new lines ---\n' >> "$LOG"
-    fi
+    printf -- '--- log contents at reader start ---\n' >> "$LOG"
+    sweep "$SOURCE" ""
+    sweep "$SRVLOG" "$SRV_TAG"
+    printf -- '--- following new lines ---\n' >> "$LOG"
 
-    # -n 0 because tail prints the last ten lines by default, and those have
-    # just been swept. Without it every restart records the same errors twice.
-    tail -n 0 -F "$SOURCE" 2>/dev/null | while read -r line; do
-        keep_line "$line" || continue
-        record_line "$line"
-    done
+    # One reader for each source. Each reader is a subshell, so each counts its
+    # own kept lines and reaches the cap on its own. Two sources therefore write
+    # at most twice MAX_LINES in one boot.
+    follow "$SOURCE" ""                &
+    follow "$SRVLOG" "$SRV_TAG" trim   &
+    wait
 }
 
 start() {

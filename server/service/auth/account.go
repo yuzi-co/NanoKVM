@@ -17,7 +17,7 @@ var AccountFile = "/etc/kvm/pwd"
 
 type Account struct {
 	Username string `json:"username"`
-	Password string `json:"password"`	// should be named HashedPassword for clarity
+	Password string `json:"password"` // should be named HashedPassword for clarity
 }
 
 func GetAccount() (*Account, error) {

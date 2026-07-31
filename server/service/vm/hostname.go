@@ -35,7 +35,7 @@ func (s *Service) SetHostname(c *gin.Context) {
 
 	oldHostname := strings.Replace(string(dataRead), "\n", "", -1)
 
-	if (oldHostname != req.Hostname) {
+	if oldHostname != req.Hostname {
 		dataRead, err = os.ReadFile(EtcHosts)
 		if err != nil {
 			rsp.ErrRsp(c, -1, "read Hosts failed")

@@ -27,6 +27,14 @@ var (
 // imgNotExist mirrors IMG_NOT_EXIST from kvm_vision.h.
 const imgNotExist = -1
 
+// One read tracker per encoding, because the two are read independently and a
+// shared tracker would report a change every time they disagreed. service/hid
+// keeps one health record per endpoint for the same reason.
+var (
+	mjpegReads captureReadLog
+	h264Reads  captureReadLog
+)
+
 // resumeCapture rebuilds the pipeline. kvmv_init is the counterpart of
 // kvmv_deinit: it recreates vi_mutex, reopens the camera and restarts libkvm's
 // two threads. The "auto init" the header claims for kvmv_read_img is only the
@@ -69,8 +77,9 @@ func (k *KvmVision) ReadMjpeg(width uint16, height uint16, quality uint16) (data
 			&kvmData,
 			&dataSize,
 		))
+
+		reportCaptureRead(&mjpegReads, result)
 		if result < 0 {
-			log.Errorf("failed to read kvm image: %v", result)
 			return
 		}
 		defer C.free_kvmv_data(&kvmData)
@@ -102,8 +111,9 @@ func (k *KvmVision) ReadH264(width uint16, height uint16, bitRate uint16) (data 
 			&kvmData,
 			&dataSize,
 		))
+
+		reportCaptureRead(&h264Reads, result)
 		if result < 0 {
-			log.Errorf("failed to read kvm image: %v", result)
 			return
 		}
 		defer C.free_kvmv_data(&kvmData)

@@ -14,8 +14,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 sed -n '/^# --- filter ---$/,/^# --- end filter ---$/p' "$VD" > "$WORK/filter.sh"
 sed -n '/^# --- record ---$/,/^# --- end record ---$/p' "$VD" > "$WORK/record.sh"
+sed -n '/^# --- trim ---$/,/^# --- end trim ---$/p'     "$VD" > "$WORK/trim.sh"
 [ -s "$WORK/filter.sh" ] || { echo "could not extract the filter block"; exit 1; }
 [ -s "$WORK/record.sh" ] || { echo "could not extract the record block"; exit 1; }
+[ -s "$WORK/trim.sh" ]   || { echo "could not extract the trim block"; exit 1; }
 
 fails=0
 note() { printf '  %-64s %s\n' "$1" "$2"; [ "$2" = FAIL ] && fails=$((fails + 1)); return 0; }
@@ -81,6 +83,50 @@ keep_case "GetChnFrame is dropped even though it is a VPSS-ERR" \
     'local5.err : [VPSS-ERR] CVI_VPSS_GetChnFrame(): fail' drop
 
 echo
+echo "===== the server's own log is a second source ====="
+# S95nanokvm now sends the server's stdout and stderr to /tmp/nanokvm-server.log,
+# and this reader follows that file as well as the syslog. Those lines carry no
+# syslog prefix, because libkvm prints them with printf. The first two are the
+# reason the whole investigation exists: they name the failing call and carry
+# the error code that no earlier attempt could recover.
+keep_case "libkvm's own init failure, no syslog prefix" \
+    '_mmf_vpss_init_new failed. s32Ret: 0xc0078003 !' keep
+keep_case "the caller's report of the same failure" \
+    'mmf_vi_init failed!' keep
+
+# libkvm prints on error paths only, so a CVI call that reports a failure is
+# worth keeping even when nobody predicted it. These are one-shot setup and
+# teardown errors, not per-frame ones.
+keep_case "encoder channel would not start" \
+    'CVI_VENC_CreateChn [0] failed with 0xc0038007' keep
+keep_case "an attribute call nobody predicted" \
+    'CVI_VPSS_SetChnAttr failed with 0xc0078003' keep
+keep_case "a bind failure during setup" \
+    'CVI_SYS_Bind failed with 0xc0018005' keep
+
+# The per-frame half of the same vocabulary. These repeat for as long as a
+# viewer is connected, so they must not reach the SD card from this source
+# either.
+keep_case "encoder send, once per frame" \
+    'CVI_VENC_SendFrame failed with -1' drop
+keep_case "encoder poll finds nothing, once per frame" \
+    'CVI_VENC_QueryStatus find not pack' drop
+keep_case "stream read, once per frame" \
+    'CVI_VENC_GetStream failed with 0xc0038010' drop
+keep_case "stream release, once per frame" \
+    'CVI_VENC_ReleaseStream failed with 0xc0038010' drop
+keep_case "frame allocation, once per frame" \
+    'Alloc frame failed!' drop
+
+# The device runs the server with logger.level: info and logger.file: stdout,
+# so logrus writes into the same file. Those entries are not driver errors and
+# must not be recorded, or an ordinary boot would fill the log.
+keep_case "a logrus info entry" \
+    '2026-07-31 08:00:00 INFO logger set success' drop
+keep_case "a logrus error entry about something else" \
+    '2026-07-31 08:00:00 ERRO get hardware version failed' drop
+
+echo
 echo "===== everything else is ignored ====="
 keep_case "an ordinary syslog line" \
     'Jul 30 20:59:40 nanokvm daemon.info udhcpc[300]: lease of 10.0.0.222 obtained' drop
@@ -113,6 +159,35 @@ cap_case "under the cap, everything is written"      3  5 3 0
 cap_case "exactly at the cap, no notice"             5  5 5 0
 cap_case "over the cap, the rest is dropped"        20  5 5 1
 cap_case "far over the cap, the notice appears once" 200 5 5 1
+
+echo
+echo "===== the server log must not fill tmpfs ====="
+# tmpfs holds 80MB and a server restart copies 36MB of /kvmapp/server into it.
+# A pipeline that fails per frame prints without limit, so an untrimmed log
+# fills tmpfs and stops the next restart. That is a worse fault than the one
+# this script investigates, so the reader empties the file when it grows.
+#
+# stderr is captured with stdout on purpose. A missing file must produce no
+# message at all: the earlier version of rotate_if_large redirected wc, but the
+# shell reports a failed redirection itself, so the message escaped anyway.
+trim_case() {
+    desc="$1"; bytes="$2"; max="$3"; want_verdict="$4"; want_size="$5"
+    f="$WORK/srv.log"; rm -f "$f"
+    [ "$bytes" = absent ] || dd if=/dev/zero of="$f" bs=1 count="$bytes" 2>/dev/null
+    got=$(SRVLOG="$f" SRV_MAX_BYTES="$max" WORK="$WORK" sh -c '
+        . "$WORK/trim.sh"
+        trim_server_log && echo trimmed || echo kept
+    ' 2>&1)
+    if [ -f "$f" ]; then size=$(wc -c < "$f" | tr -d ' '); else size=absent; fi
+    [ "$got" = "$want_verdict" ] && [ "$size" = "$want_size" ] \
+        && note "$desc -> $got, $size bytes" OK \
+        || note "$desc -> [$got]/$size, want [$want_verdict]/$want_size" FAIL
+}
+
+trim_case "under the cap, left alone"          100 1000 kept    100
+trim_case "exactly at the cap, left alone"    1000 1000 kept    1000
+trim_case "one byte over the cap, emptied"    1001 1000 trimmed 0
+trim_case "no server log yet, and no message" absent 1000 kept  absent
 
 echo
 if [ "$fails" -eq 0 ]; then

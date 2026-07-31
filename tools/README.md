@@ -171,6 +171,18 @@ a binary that cannot start must not be retried in a tight loop on a single core,
 and must not be abandoned either. A run lasting a minute resets the delay, so a
 board that crashes once a day does not creep to the cap and stay there.
 
+The supervisor starts the server itself, rather than through `S95nanokvm`,
+because a full restart copies 36MB back into tmpfs for nothing. It therefore
+carries the same redirection: the server's output goes to
+`/tmp/nanokvm-server.log`, which is where `S99vidiag` reads it. Without that, the
+first crash ends the record of the capture pipeline, and it ends it silently -
+the file stays where it is, and nothing looks wrong. The supervisor appends,
+because what a dead server said last is the most useful part of the file.
+
+Measured on hardware after the change: `kill -9` left the log at 10876 bytes, the
+supervisor started the replacement 5 seconds later, and the log reached 21982
+bytes. Before the change it stayed at 10876.
+
 `deploy/deploy-server` is the other half. It snapshots, installs, restarts,
 probes, and restores the previous binary if the new one does not answer. Two of
 its checks are less obvious than they look, and both are there because the first

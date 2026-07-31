@@ -8,8 +8,8 @@
 # no error code to work from.
 #
 # This script copies the few lines that matter to /data, which is a separate
-# partition and survives a reboot. It writes nothing while the pipeline is
-# healthy.
+# partition and survives a reboot. It writes a few lines for each start of the
+# capture pipeline, and nothing else while the pipeline is healthy.
 #
 # The script starts a background reader and returns. If the reader stops, the
 # KVM is unaffected. Nothing here is in the path of the video service.
@@ -81,6 +81,23 @@ keep_line() {
         # with logger.level "info" and logger.file "stdout", so logrus writes
         # into the same file, and those entries must not be recorded.
         *CVI_VI_*|*CVI_VPSS_*|*CVI_VENC_*|*CVI_SYS_*) return 0 ;;
+
+        # The teardown that runs before a failed init, and the call that asks
+        # for it. ~CameraCviMmf ends with mmf_try_deinit(true), which sets the
+        # reference count to zero and destroys the media stack for every user at
+        # once. Camera::restart calls it, and the resolution probe and the
+        # detect thread call Camera::restart while the board runs. A failure
+        # that follows one of these has a cause the driver's message does not
+        # name. "mmf insmod" marks the reload, which only runs when a stale
+        # video buffer pool is there already.
+        #
+        # These are lifecycle markers and not errors, so the log holds a few of
+        # them for each start of the capture pipeline. The probe's own messages
+        # stay out: it prints "Cannot obtain HDMI input" on every pass of a loop
+        # that does not advance, and that loop has no delay.
+        *'driver destroyed'*) return 0 ;;
+        *'restart cam'*)      return 0 ;;
+        *'mmf insmod'*)       return 0 ;;
 
         *)                 return 1 ;;
     esac

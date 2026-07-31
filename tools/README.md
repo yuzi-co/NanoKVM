@@ -299,55 +299,96 @@ the next attempt. Every earlier attempt to explain it worked from no error code
 at all, for two reasons:
 
 - `/var/log` is a symlink to `/tmp`. Each reboot destroys the log.
-- The server sends its own standard output to `/dev/null`, so every `SAMPLE_PRT`
-  line from `libkvm` is discarded as it is written.
+- The server sent its own standard output to `/dev/null`, so every message from
+  `libkvm` was discarded as it was written.
 
-The middleware also logs through syslog, and those lines do carry the failing
-function and the error code. `S99vidiag` copies the useful ones to
-`/data/kvm-diag/vi-errors.log`. `/data` is a separate partition, so the record
-survives a reboot.
+`S99vidiag` copies the useful lines to `/data/kvm-diag/vi-errors.log`. `/data` is
+a separate partition, so the record survives a reboot.
 
 | what | value |
 | --- | --- |
 | log | `/data/kvm-diag/vi-errors.log`, one older generation kept |
+| sources | `/var/log/messages`, and `/tmp/nanokvm-server.log` |
 | rotates at | 256KB |
-| stops after | 200 lines in one boot, and says so in the log |
+| stops after | 200 lines for each source in one boot, and says so in the log |
+| empties the server log at | 128KB |
 | control | `/etc/init.d/S99vidiag` with `start`, `stop` or `restart` |
 | test | `tools/vidiag/test-vidiag.sh` |
 
+### The two sources report different halves of the failure
+
+The middleware logs through syslog. Those lines carry the failing function and
+the error code of the driver. They do not carry the value that `libkvm` sees.
+`libkvm` prints that value with `printf`, and it never reaches syslog: the
+library imports `printf`, `puts` and `fwrite`, and it does not import `syslog`.
+
+`S95nanokvm` therefore sends the server's output to `/tmp/nanokvm-server.log`,
+and the reader follows that file as well as the syslog.
+
+### A redirection alone captures one line
+
+musl decides how to buffer stdout at the first write. If stdout is not a
+terminal, musl releases that first line and then buffers in full. Each message
+after it waits for the 1024-byte buffer to fill, or for the process to exit. The
+server does not exit, so a failure that prints 65 bytes stays in the buffer while
+the board runs.
+
+`tools/vidiag/buftest.c` measures this on the device. It prints 12 messages, one
+each second, to a file:
+
+| buffering | after 5 seconds | after the program exits |
+| --- | --- | --- |
+| default | 1 message | 12 messages |
+| `setvbuf(stdout, NULL, _IOLBF, 0)` | 5 messages | 12 messages |
+
+The server asks for line buffering at startup. See
+`server/common/libkvm_stdout.go`. The Go runtime writes with `write(2)` and does
+not use C stdio, so the call changes the output of the C libraries only.
+
+### What the filter keeps
+
 The script keeps every `[VPSS-ERR]`, `[VI-ERR]`, `[SYS-ERR]` and `[VENC-ERR]`
-line, and every `base_mod_jobs` line from the kernel. It is deliberately not a
-list of the calls we expect to fail: nobody knows which call fails, and a list of
-guesses would drop the one line that matters.
+line, every `base_mod_jobs` line from the kernel, and every named `CVI_` call
+from the server's log. It is deliberately not a list of the calls we expect to
+fail: nobody knows which call fails, and a list of guesses would drop the one
+line that matters.
 
 It removes the per-frame errors first. `CVI_VPSS_GetChnFrame` fails once a second
-for as long as a viewer is connected to a target whose display is asleep, and it
-matched 62 times in one boot of a healthy board. Recording that would make a hot
-file on the boot medium.
+for as long as a viewer is connected to a target whose display is asleep. Those
+lines were 695 of the 700 lines in one 12-minute window of the raw syslog, and
+they rotate every other line out of it. Recording them would also make a hot file
+on the boot medium.
 
-The reader starts with a sweep of what is already in the syslog, because this
-script runs last in the boot order and the drivers load first. The sweep repeats
-if you restart the reader by hand, so it writes a header first. A repeated line
-under that header is the reader reading the file again, not the fault happening
-again.
+The reader empties the server's log at 128KB. tmpfs holds 80MB, and a server
+restart copies 36MB of `/kvmapp/server` into it. If the log fills tmpfs, the next
+restart stops. That fault is worse than the one under investigation.
 
-### What the first sweep found
+The reader starts with a sweep of each source, because this script runs last in
+the boot order and the drivers load first. The sweep repeats if you restart the
+reader by hand, so it writes a header first. A repeated line under that header is
+the reader reading the file again, not the fault happening again.
 
-The HDMI receiver does not answer on I2C when capture starts:
+### What the first sweep found, and what it did not
+
+The reader recorded two events. Both are server restarts that the operator
+started: the times match `deploy-restart.log` and `deploy-solib.sh` on the
+device. Each event has the same shape:
 
 ```
+[VI-ERR] cvi_vi.c:101:CHECK_VI_CTX_NULL_PTR(): Call SetDevAttr first
 [VI-ERR] lt6911_sensor_ctl.c:136:lt6911_write_register(): I2C_WRITE error!
 [VI-ERR] lt6911_sensor_ctl.c:85:lt6911_read_register(): I2C_WRITE error!
 [VI-ERR] lt6911_sensor_ctl.c:214:lt6911_probe(): read sensor id error.
 [VI-ERR] lt6911_sensor_ctl.c:222:lt6911_probe(): Sensor ID Mismatch! Use the wrong sensor??
-[VI-ERR] cvi_vi.c:101:CHECK_VI_CTX_NULL_PTR(): Call SetDevAttr first
 ```
 
 The driver tries three times, fails to read the chip identifier, and reports a
-mismatch. This repeats at each capture start.
+mismatch. Capture then works: the same boot delivers 1920x1080 at 28fps.
 
-**This is not established as the cause.** Capture works on this board: the same
-boot delivers 1920x1080 at 28fps. The value of the lines is that they are the
-first hard evidence upstream of the VI init failure, and that nothing else in the
-system reports them. Do not write them into a code comment as an explanation -
-that mistake has already been made once here with the RTOS messages.
+**This is the signature of a start that succeeds. It is not the fault.** An
+earlier revision of this file offered these lines as the first evidence upstream
+of the VI init failure. That reading was wrong. The record holds no `[VPSS-ERR]`
+from `CreateGrp`, `ResetGrp` or `StartGrp`, so the intermittent failure did not
+happen while the reader ran. Do not write these lines into a code comment as an
+explanation - that mistake has already been made once here with the RTOS
+messages.

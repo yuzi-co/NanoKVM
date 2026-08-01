@@ -32,7 +32,17 @@ BUILD_STAMP ?= dev.$(BUILD_DATE)$(if $(GIT_SHA),.$(GIT_SHA))$(if $(GIT_DIRTY),.d
 GO_LDFLAGS := $(if $(BUILD_STAMP),-ldflags "-X NanoKVM-Server/common/version.Build=$(BUILD_STAMP)")
 
 # Build commands
-GO_BUILD_CMD := cd /home/build/NanoKVM/server && go mod tidy && CGO_ENABLED=1 GOOS=linux GOARCH=riscv64 CC=riscv64-unknown-linux-musl-gcc CGO_CFLAGS="-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d" go build $(GO_LDFLAGS)
+#
+# -buildvcs=false turns off the VCS stamp that Go adds by default. Go runs git
+# to make that stamp. Docker shows the bind mount as owned by root, the
+# container runs as the host user, and git then refuses the checkout as
+# "dubious ownership" and exits 128. Go reports the failure and stops. The
+# build stamp above already identifies the binary, it is computed on the host,
+# and it reaches the linker through -X, so the VCS stamp adds nothing here.
+#
+# server/build.sh does not need the flag. It runs on the host, where the
+# checkout and the user agree, so git answers there.
+GO_BUILD_CMD := cd /home/build/NanoKVM/server && go mod tidy && CGO_ENABLED=1 GOOS=linux GOARCH=riscv64 CC=riscv64-unknown-linux-musl-gcc CGO_CFLAGS="-mcpu=c906fdv -march=rv64imafdcv0p7xthead -mcmodel=medany -mabi=lp64d" go build -buildvcs=false $(GO_LDFLAGS)
 SUPPORT_BUILD_CMD := . ./home/build/MaixCDK/bin/activate && cd /home/build/NanoKVM/support/sg2002 && ./build kvm_system && ./build kvm_system add_to_kvmapp
 VISION_BUILD_CMD := . ./home/build/MaixCDK/bin/activate && cd /home/build/NanoKVM/support/sg2002 && ./build kvm_vision && ./build kvm_vision add_to_kvmapp
 RELEASE_BUILD_CMD := /home/build/NanoKVM/scripts/build-in-container.sh

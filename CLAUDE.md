@@ -51,14 +51,28 @@ The device build is a RISC-V cross-compile and links against `libkvm` from `serv
 ```shell
 make app          # cross-compile NanoKVM-Server in the Docker builder
 make support      # build kvm_system via MaixCDK and drop it into kvmapp/
+make vision       # build the capture libraries (libkvm.so, libkvm_mmf.so)
 make shell        # interactive shell inside the builder
 make all          # app + support
 make clean
 ```
 
+Run `./build update_lib` before `make support` or `make vision`. The MaixCDK build reads its
+components from the SDK directory inside the builder image, not from this checkout. `update_lib`
+copies `support/sg2002/additional/*` over them, and no other subcommand does. Without that step the
+build compiles whatever sources the image was baked with, it reports success, and the mismatch only
+appears if you compare the exported symbols afterwards:
+
+```shell
+docker run -e UID=$(id -u) -e GID=$(id -g) -v "$PWD:/home/build/NanoKVM" --rm \
+  nanokvm-builder-local-$(id -u)-$(id -g) /bin/bash -c \
+  '. ./home/build/MaixCDK/bin/activate && cd /home/build/NanoKVM/support/sg2002 \
+   && ./build update_lib && ./build kvm_vision'
+```
+
 The Makefile targets shell out to `id -u` and refuse to run as root — they need Docker and a
-POSIX shell (Git Bash/WSL on Windows, not PowerShell). They also use `docker run -it`, so they need
-a TTY and cannot be driven from a non-interactive tool call. `server/build.sh` is the same build for
+POSIX shell (Git Bash/WSL on Windows, not PowerShell). They allocate a TTY by default; pass
+`DOCKER_TTY=` to drive them from a non-interactive tool call. `server/build.sh` is the same build for
 a host that already has the toolchain and `patchelf` on PATH; it is also the only one of the two
 that patches the RPATH, so after `make app` that step still has to be done by hand:
 

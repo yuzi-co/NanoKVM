@@ -157,6 +157,25 @@ patchelf --set-rpath '$ORIGIN' libkvm.so
 The device loader does not need this step. The loader searches the `RPATH` of `NanoKVM-Server`,
 which is `$ORIGIN/dl_lib`, for every library in the chain. Only the cross-linker needs the change.
 
+A rebuilt `libkvm.so` also records a dependency that it does not use. The MaixCDK `vision`
+component requires the whole `opencv` package, so the linker writes one `NEEDED` entry for each
+opencv module. `libopencv_video.so.409` is one of them. No symbol in `libkvm.so` comes from it: the
+library has 311 undefined symbols, `libopencv_video.so.409` exports 249, and the two sets do not
+meet. The entry still costs memory. The device resolves it from `/usr/lib`, and that library needs
+`libopencv_dnn`, `libopencv_calib3d`, `libopencv_features2d` and `libopencv_flann`. The loader then
+maps 6.1MB that nothing calls. Remove the entry after you set the search path:
+
+```shell
+patchelf --remove-needed libopencv_video.so.409 libkvm.so
+```
+
+Compare the dependency list against the committed library before you ship a rebuild. The two lists
+must agree:
+
+```shell
+patchelf --print-needed libkvm.so
+```
+
 The executable records `libkvm.so` and `libc.so` as its own `NEEDED` entries.
 
 **Video has three delivery paths**, all under `service/stream/`: `mjpeg`, `webrtc` (H.264 over

@@ -85,11 +85,9 @@ grep -c pthread ~/MaixCDK/components/kvm_mmf/src/kvm_mmf.cpp
 `kvm_vision` is the target that builds the capture library; the project lives in
 `kvm_vision_test/`. `kvm_system` does not compile `kvm_mmf` at all.
 
-**The committed `dl_lib` prebuilts are older than the committed sources.** A
-build from the current tree produces a `libkvm_mmf.so` that exports one function
-more than the shipped copy (`mmf_vi_frame_release`), and a `libkvm.so` 200KB
-smaller. So replacing a prebuilt brings in every source change since it was
-built, not only yours. Compare exported symbols before swapping one in:
+**Compare a rebuilt library against the prebuilt before you swap it in.** A
+replacement brings in every source change since the prebuilt was made, not only
+yours. Compare the exported symbols first:
 
 ```shell
 readelf --dyn-syms -W lib.so | awk 'NR>3 && $5=="GLOBAL" && $7!="UND" {print $8}' | sort -u
@@ -98,6 +96,31 @@ readelf --dyn-syms -W lib.so | awk 'NR>3 && $5=="GLOBAL" && $7!="UND" {print $8}
 Getting those `awk` columns wrong prints nothing and diffs clean, which looks
 like proof of compatibility and is not. The columns are
 `Num Value Size Type Bind Vis Ndx Name`.
+
+Measured against the tree at `283f6dbd` on 2026-08-01:
+
+- `libkvm_mmf.so` agrees. The prebuilt and a fresh build each export 285 symbols,
+  and both are 213872 bytes. An earlier revision of this file reported one extra
+  function in the rebuild, `mmf_vi_frame_release`. The prebuilt exports it now,
+  so that difference is gone and only `libkvm.so` needs replacing.
+- `libkvm.so` differs. A rebuild is 64KB larger than the prebuilt.
+
+A rebuilt `libkvm.so` needs two `patchelf` steps before it works: MaixCDK writes
+its own build directory into the `RPATH`, and the link records an opencv module
+that nothing calls. `CLAUDE.md` gives both commands and the reason for each.
+
+The device answers the question that symbol lists only approach. Copy the new
+library and a server that links against it into a scratch directory, and ask the
+loader to resolve them. Nothing running is touched:
+
+```shell
+/lib/ld-musl-riscv64xthead.so.1 --list /root/libkvm-test/NanoKVM-Server
+```
+
+Every line must name a file. A missing symbol appears as `Error relocating`, and
+a library that resolves from `/lib` instead of `dl_lib` is a dependency the
+prebuilt did not have. Only `libc`, `libstdc++`, `libgomp`, `libgcc_s` and
+`libatomic` belong outside `dl_lib`.
 
 **A boot that answers ping and nothing else needs the card out.** `/boot/slot`
 selects the root filesystem and lives on a FAT partition, so changing it needs a

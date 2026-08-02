@@ -14,7 +14,11 @@ import (
 )
 
 const (
-	messageWait    = 10 * time.Second
+	messageWait = 10 * time.Second
+	// maxReadSize bounds one client frame. The terminal only carries typed
+	// input and pastes, so this is generous, and without it gorilla buffers a
+	// whole message before the handler ever sees it.
+	maxReadSize    = 64 * 1024
 	maxMessageSize = 1024
 )
 
@@ -83,6 +87,7 @@ func wsWrite(ws *websocket.Conn, ptmx *os.File) {
 func wsRead(ws *websocket.Conn, ptmx *os.File) {
 	var zeroTime time.Time
 	_ = ws.SetReadDeadline(zeroTime)
+	ws.SetReadLimit(maxReadSize)
 
 	for {
 		msgType, p, err := ws.ReadMessage()

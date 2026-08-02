@@ -14,6 +14,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// maxSignalingSize bounds one signaling frame. SDP and ICE candidates stay
+// well below this.
+const maxSignalingSize = 256 * 1024
+
 var (
 	upgrader = websocket.Upgrader{
 		WriteBufferSize: 256 * 1024,
@@ -47,6 +51,7 @@ func Connect(c *gin.Context) {
 
 	var zeroTime time.Time
 	_ = wsConn.SetReadDeadline(zeroTime)
+	wsConn.SetReadLimit(maxSignalingSize)
 
 	// create video connection
 	iceServers := createICEServers()

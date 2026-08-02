@@ -50,13 +50,16 @@ func SetAccount(username string, hashedPassword string) error {
 		return err
 	}
 
-	err = os.MkdirAll(filepath.Dir(AccountFile), 0o644)
+	// 0o644 on a directory leaves it without the execute bit, so nothing
+	// inside can be opened by path.
+	err = os.MkdirAll(filepath.Dir(AccountFile), 0o755)
 	if err != nil {
 		log.Errorf("create directory %s failed: %s", AccountFile, err)
 		return err
 	}
 
-	err = os.WriteFile(AccountFile, account, 0o644)
+	// The file holds a password hash; only root needs to read it.
+	err = os.WriteFile(AccountFile, account, 0o600)
 	if err != nil {
 		log.Errorf("write password failed: %s", err)
 		return err

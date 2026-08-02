@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/param.h>
+#include <pthread.h>
 #include "math.h"
 #include <inttypes.h>
 
@@ -1283,8 +1284,31 @@ static CVI_S32 _mmf_vpss_init_new(VPSS_GRP VpssGrp, CVI_U32 width, CVI_U32 heigh
 	return s32Ret;
 }
 
+// vi_lock serialises the pair below. priv.vi_is_inited is read and then written
+// without any lock, and more than one thread reaches these functions: the
+// capture path, the HDMI event path that sets reopen_cam_flag, and whatever
+// asks for a resolution change. A check-then-act on a shared bool is not safe
+// between them.
+//
+// _mmf_add_vi_channel reads the flag without the lock and calls mmf_vi_init if
+// it is clear. That read stays as it is: the decision it makes is re-taken here
+// under the lock, so the worst case is a call that returns 0 immediately.
+static pthread_mutex_t vi_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// vi_lock_guard holds vi_lock for a scope. Both functions below have several
+// exits, and an unlock at each one is a line that a later edit can forget.
+class vi_lock_guard {
+public:
+	vi_lock_guard() { pthread_mutex_lock(&vi_lock); }
+	~vi_lock_guard() { pthread_mutex_unlock(&vi_lock); }
+	vi_lock_guard(const vi_lock_guard &) = delete;
+	vi_lock_guard &operator=(const vi_lock_guard &) = delete;
+};
+
 int mmf_vi_init(void)
 {
+	vi_lock_guard guard;
+
 	if (priv.vi_is_inited) {
 		return 0;
 	}
@@ -1304,6 +1328,8 @@ int mmf_vi_init(void)
 
 int mmf_vi_deinit(void)
 {
+	vi_lock_guard guard;
+
 	if (!priv.vi_is_inited) {
 		return 0;
 	}

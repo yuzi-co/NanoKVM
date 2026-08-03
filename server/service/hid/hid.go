@@ -37,11 +37,21 @@ type hidWriter interface {
 	Write([]byte) (int, error)
 }
 
+// hidDevice points at one of the Hid handles rather than closing over it. A
+// device is built for every HID report, and a pair of closures would be two
+// heap allocations on the hottest path in the server.
 type hidDevice struct {
 	path string
 	mu   *sync.Mutex
-	get  func() *os.File
-	set  func(*os.File)
+	file **os.File
+}
+
+func (d hidDevice) get() *os.File {
+	return *d.file
+}
+
+func (d hidDevice) set(file *os.File) {
+	*d.file = file
 }
 
 var (
@@ -67,42 +77,15 @@ func (h *Hid) Unlock() {
 }
 
 func (h *Hid) keyboardDevice(path string) hidDevice {
-	return hidDevice{
-		path: path,
-		mu:   &h.kbMutex,
-		get: func() *os.File {
-			return h.g0
-		},
-		set: func(file *os.File) {
-			h.g0 = file
-		},
-	}
+	return hidDevice{path: path, mu: &h.kbMutex, file: &h.g0}
 }
 
 func (h *Hid) relativeMouseDevice(path string) hidDevice {
-	return hidDevice{
-		path: path,
-		mu:   &h.mouseMutex,
-		get: func() *os.File {
-			return h.g1
-		},
-		set: func(file *os.File) {
-			h.g1 = file
-		},
-	}
+	return hidDevice{path: path, mu: &h.mouseMutex, file: &h.g1}
 }
 
 func (h *Hid) absoluteMouseDevice(path string) hidDevice {
-	return hidDevice{
-		path: path,
-		mu:   &h.mouseMutex,
-		get: func() *os.File {
-			return h.g2
-		},
-		set: func(file *os.File) {
-			h.g2 = file
-		},
-	}
+	return hidDevice{path: path, mu: &h.mouseMutex, file: &h.g2}
 }
 
 func (h *Hid) devices() []hidDevice {
@@ -325,6 +308,17 @@ func (h *Hid) writeHID(device hidDevice, data []byte) error {
 		}
 	}
 
-	log.Debugf("write to %s: %v", device.path, data)
+	traceHIDWrite(device.path, data)
 	return nil
+}
+
+// traceHIDWrite logs a report only when someone is listening. logrus skips the
+// formatting on its own, but the variadic call still allocates a slice and
+// boxes both arguments, once per report.
+func traceHIDWrite(path string, data []byte) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+
+	log.Debugf("write to %s: %v", path, data)
 }

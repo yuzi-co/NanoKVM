@@ -51,14 +51,11 @@ start_usb_dev(){
     mkdir configs/c.1/strings/0x409
     echo "NanoKVM" >  configs/c.1/strings/0x409/configuration
 
-    # Derive both gadget MACs from the chip UID before binding. Without this
-    # the kernel picks a random dev_addr/host_addr on every bind, so the
-    # attached PC registers a brand-new network adapter each reboot and piles
-    # up stale ones. host_addr is the MAC the PC itself uses, so it is the one
-    # that breaks DHCP reservations and firewall rules when it drifts.
-    usb_uid=$(sha512sum /sys/class/cvi-base/base_uid 2>/dev/null | head -c 4)
-    usb_dev_mac=''
-    usb_host_mac=''
+    # Deterministic gadget MACs from the chip UID so the host-side RNDIS/NCM
+    # interface keeps a STABLE MAC across re-enumeration/reboot. Without this
+    # the kernel assigns a random dev_addr/host_addr on every bind, so the
+    # attached PC sees a brand-new network adapter (and MAC) each time.
+    usb_uid=$(sha512sum /sys/class/cvi-base/base_uid | head -c 4)
     if [ -n "$usb_uid" ]
     then
         usb_dev_mac="48:da:35:6e:${usb_uid%??}:${usb_uid#??}"

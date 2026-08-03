@@ -13,6 +13,7 @@ are operator tools.
 | `oled/`       | Move the status image to spread OLED wear, with no change to `kvm_system`. |
 | `service/`    | Restart `NanoKVM-Server` and `kvm_system` if they die. Nothing else does. |
 | `deploy/`     | Install a server build and put the old one back if it does not serve.   |
+| `usbdev/`     | Check the USB gadget: the optional ACM console, and the link order.     |
 
 ## Ten things that cost real time
 
@@ -239,10 +240,37 @@ the KVM: every recovery below needs either a working shell or the SD card in a
 reader.
 
 There is no serial console either. `inittab` respawns a getty on `ttyGS0`, but
-`S03usbdev` only creates HID functions, so that device never appears. Adding an
-`acm` function would give the managed host a root console over the USB cable
-that is already connected - worth considering, and a security decision, because
-whoever controls the managed machine would then have root on the KVM.
+`S03usbdev` used to create only HID functions, so that device never appeared.
+
+`S03usbdev` can now add an `acm` function, which gives the managed host a login
+prompt on the KVM over the USB cable that is already connected. Everything else
+was in place: the kernel has `CONFIG_USB_F_ACM` and `CONFIG_USB_CONFIGFS_ACM`,
+the getty is in `inittab`, and `/etc/ttyGS0_handler.sh` runs `login`. Only the
+gadget function was missing.
+
+It is off unless `/boot/usb.acm` exists, and that is a security decision rather
+than a default: whoever controls the managed machine gets a login prompt on the
+KVM. **Change the root password before creating the flag.** The stock password
+is `root`, which makes the prompt a formality.
+
+```shell
+passwd                                    # not the default one
+touch /boot/usb.acm
+/etc/init.d/S03usbdev stop_start          # or reboot
+ls -l /dev/ttyGS0                         # the getty now has something to hold
+```
+
+The function is added last, after the HID and mass-storage links. configfs
+numbers interfaces in link order, so anything inserted ahead of the HID
+functions renumbers the keyboard and the mice under a host already bound to
+them. `tools/usbdev/test-acm-console.sh` checks that order, and checks that the
+gadget is unchanged when the flag is absent.
+
+**This does not make a kernel change recoverable.** The console is created by
+`S03usbdev`, which is userspace, and the initramfs mass-storage mode lives
+inside `boot.sd`. A `boot.sd` that does not boot takes both of them with it.
+What this recovers is a board whose userland is broken or whose network is
+gone - not one that never reaches userland.
 
 The stock initramfs has a mass-storage recovery mode that predates any of this:
 

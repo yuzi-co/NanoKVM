@@ -125,6 +125,69 @@ SSH must be enabled first (Web UI: `Settings > SSH`; default login `root`/`root`
 - Frontend: rename `web/dist` to `web` and upload to `/kvmapp/server/`.
 - Then `/etc/init.d/S95nanokvm restart`.
 
+## Branches
+
+This fork keeps two kinds of branch. Tell them apart by their merge-base, never by their name and
+never by whether their content is already in `main`:
+
+```shell
+git merge-base main <branch>
+```
+
+- **Cut from `upstream/main`.** A single-purpose extraction of work that already lives in `main`,
+  shaped so a pull request to `sipeed/NanoKVM` shows only that change.
+- **Cut from `main`.** Fork work that `main` does not carry yet.
+
+`fork/integration` stacks the second kind on top of `main`. It is what the device should run, and it
+stays ahead of `upstream/main` permanently. `main` is a linear stack on `upstream/main` with no merge
+commits, so `git rev-list --count upstream/main..main` measures how far the fork has moved.
+
+**An extraction branch is patch-equal to `main` by design.** The work lands in `main` first, and the
+branch is the upstream-facing copy of it. `git cherry main <branch>` reporting every commit as `-` is
+therefore not evidence that the branch is stale. Deleting on that signal destroys the only
+upstream-facing copy of the work. Record the SHAs before deleting any branch here.
+
+### Pull request order
+
+Extractions that share a prerequisite form a chain. Land the shorter branch first — each one is a
+prefix of the branch below it.
+
+```
+security/api-injection-holes
+  ├─ security/download-verify ─ feat/device-http-proxy
+  ├─ security/api-key-auth
+  └─ security/usb-gadget-identity ─ fix/hid-gadget-rebuild ─ fix/hid-endpoint-reporting
+
+fix/stream-stalled-viewer ─ perf/mjpeg-per-client
+  └─ perf/frame-copy-reduction ─ perf/web-cache-headers
+```
+
+Every other branch stands alone.
+
+Upstream lands pull requests two ways: a true merge (`#845`) and a squash (`#844`). A squash returns
+with a different patch id, so a rebase of `fork/integration` onto the new `upstream/main` does not
+drop it. Expect to `git rebase --skip` those by hand.
+
+### What does not go upstream
+
+`tools/`, `CLAUDE.md`, `.gitattributes` and `server/dl_lib/` belong to the fork. So does
+`kvmapp/system/init.d/S99vidiag`, the capture diagnostic script, because upstream has no such file.
+
+`backup/pre-rebase-20260801` is not a redundant copy. It holds `server/service/vm/hdmi_idle.go` and
+its tests, about 540 lines that the 2026-08-01 rebase dropped, and they exist on no other ref. Do not
+prune it.
+
+### Line endings when you read git output
+
+`core.autocrlf` is `true` in the system gitconfig on a Windows workstation, and `git grep` and
+`git diff` apply that conversion to what they print. Both report carriage returns in files whose
+stored blobs have none. Only `git cat-file -p <rev>:<path>` applies no filter, so trust that one.
+
+A worktree created at `upstream/main` also checks out CRLF, because `.gitattributes` is a file the
+fork adds. `tools/test-line-endings.sh` run in such a worktree fails on about 20 device scripts that
+are correct in the repository. A clean cherry-pick takes its blobs from the object database, so the
+conversion cannot reach the commit.
+
 ## Backend architecture
 
 **Request flow.** `main.go` → `router.Init` → per-domain `*Router(r)` functions in `router/` →

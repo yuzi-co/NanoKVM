@@ -977,3 +977,66 @@ rebuilt driver.
 loaded before `soph_vi`, and it predates any rebuild. The rebuilt `soph_vi.ko`
 produces no vermagic line at all, which is the confirmation that its own magic
 matches.
+
+## What the detection thread costs, and why it stays as it is
+
+`vi_subsystem_detection` in `kvm_vision.cpp` waits 10ms between passes, so it
+wakes 100 times a second for as long as the server runs. Nobody has to be
+watching. Measured on a device that had run for three hours with no viewer:
+
+| | |
+| ------------------------------ | ----------------------------------------- |
+| detection thread, whole uptime | 18624 jiffies over 11100 seconds, `1.68%` |
+| share of the board's user CPU  | 92% of 20108 jiffies                       |
+| work per pass                  | about 168us, over 1.1 million passes       |
+
+The board has one core, so that is the largest single userspace cost on an idle
+KVM. This section records what the cost is made of. It does not ask for a change,
+and the reason is below.
+
+### Two thirds of it is one proc read, not the polling
+
+The pass interval is not the whole story. `refresh_vi_state` reads
+`/proc/cvitek/vi_dbg` every ten seconds whatever the interval is, and that read
+is expensive. Sample the thread once a second and the beat is visible:
+
+```
+10s ###        20s #####      30s #####      40s ####
+(0 or 1 jiffies in every second between the spikes)
+```
+
+Over 40 seconds the thread used 27 jiffies. The four spikes hold 17 of them. So
+one refresh costs about 4.25 jiffies, which is 42ms of CPU, and the refreshes are
+63% of what the thread spends.
+
+A 50ms interval was built and measured on the device to confirm this. The thread
+fell from `1.68%` to `0.67%`, and the VI and scaler interrupt rates did not
+change. Solving the two measurements for a fixed cost and a per-pass cost gives
+about 12.6us for each pass and about 0.42% for the refresh - the same answer the
+spikes give, from different data.
+
+The change was then removed. One point of one core is not worth a rebuild of the
+capture library on a board whose real costs are the 25MB of unused carveout above
+and a capture pipeline that runs at 110 interrupts a second with no viewer.
+
+### The ten second refresh is margin, not waste
+
+The publisher refreshes every ten seconds. The consumer, `kvm_update_hdmi_state`
+in `system_state.cpp`, accepts state up to thirty seconds old. That looks like
+three times more work than the consumer asks for. It is not.
+
+`defer_vi_state_refresh` skips a refresh while a mode change or an active
+detection runs. At ten seconds the consumer stays inside its own limit through
+two skips in a row. At twenty seconds one skip puts it past thirty, and then it
+takes its fallback path - which reads `/proc/cvitek/vi_dbg` itself, every ten
+seconds, in the OLED loop. The same 42ms moves to a worse place.
+
+For the same reason the refresh cannot simply be dropped. It has two consumers:
+`kvm_system` reads it for the OLED, and the detection thread reads its own result
+back as `last_vi_state_code` for the resolution state machine.
+
+**Do not shorten the publish interval, and do not remove the publish.** Both make
+the board do more work, not less. The only lever that would help is a cheaper
+answer to "is the VI producing frames" - the interrupt count for `a000000.vi` in
+`/proc/interrupts` is one - and that serves the OLED alone. The detection thread
+still needs the width, the height and the frame rate from the same read.

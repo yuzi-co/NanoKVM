@@ -10,6 +10,7 @@ are operator tools.
 | `slots/`      | A/B root filesystems: patch the initramfs, build and install a slot.   |
 | `slots/device/S00awatchdog` | Reverts the slot marker if a board under test never becomes reachable. |
 | `zram/`       | Build `zram.ko`/`zsmalloc.ko` for the stock kernel, and enable them.   |
+| `vi-loadavg/` | Build `soph_vi.ko` with the four idle ISP waits moved to `TASK_IDLE`.  |
 | `oled/`       | Move the status image to spread OLED wear, with no change to `kvm_system`. |
 | `service/`    | Restart `NanoKVM-Server` and `kvm_system` if they die. Nothing else does. |
 | `deploy/`     | Install a server build and put the old one back if it does not serve.   |
@@ -848,3 +849,103 @@ idle at the same moment.
 boot and stopped. The failure described here is not in it — it was only in
 `/tmp/nanokvm-server.log`, which the restart arm truncated. The truncation now
 runs after the wait, so what the old server says on its way out survives.
+
+## The load average counts four threads that never run
+
+An idle board reported a load average of about 4 while `top` measured 90% idle.
+The two numbers describe different things, and on this board only one of them is
+about work.
+
+Linux counts `TASK_RUNNING` **and** `TASK_UNINTERRUPTIBLE` in the load average.
+The VI driver starts four kernel threads that wait in `TASK_UNINTERRUPTIBLE`, so
+each one adds 1 forever:
+
+| thread | function in `vi.c` | CPU used since boot |
+| --- | --- | --- |
+| `cvitask_isp_pre` | `_vi_preraw_thread` | **0 ticks** |
+| `cvitask_isp_blank` | `_vi_vblank_handler_thread` | **0 ticks** |
+| `cvitask_isp_err` | `_vi_err_handler_thread` | **0 ticks** |
+| `vi_event_handle` | `_vi_event_handler_thread` | 631 ticks (0.4%) |
+
+Three of them had never run at all. `procs_running` in `/proc/stat` read 1 and
+`procs_blocked` read 0 - `procs_blocked` counts iowait only, so it does not see
+these at all.
+
+### The fix is the sleep state, not the sleep
+
+`wait_event_idle` sleeps in `TASK_IDLE`, which is
+`TASK_UNINTERRUPTIBLE | TASK_NOLOAD`: the same uninterruptible sleep, excluded
+from the load calculation. It has been in the kernel since 4.13 and is present
+in this board's own tree, at `linux_5.10/include/linux/wait.h:633`.
+
+The wake condition, the return value and the `SCHED_FIFO` priority 90 that
+`cvi_sched.h` assigns these threads all stay as they were. Only the accounting
+changes. `tools/vi-loadavg/task-idle.patch` is the whole change: three
+`wait_event` and one `wait_event_timeout`, in `osdrv/interdrv/v2/vi/chip/mars/vi.c`.
+
+### Building it
+
+`tools/vi-loadavg/build-soph-vi.sh` patches, builds and verifies. It needs the
+board's BSP and the running kernel's own config:
+
+```shell
+ssh root@<device> 'zcat /proc/config.gz' > kernel.config
+git clone --depth 1 --filter=blob:none --sparse -b NanoKVM \
+    https://github.com/sipeed/LicheeRV-Nano-Build
+cd LicheeRV-Nano-Build && git sparse-checkout set linux_5.10 osdrv
+```
+
+The build container needs `bc flex bison rsync libssl-dev libelf-dev` on top of
+the NanoKVM builder image. Two traps cost time here. The osdrv Makefiles read
+`$(PWD)`, which make does not set, so `make -C dir` roots every include path at
+`/` and fails on a missing `Makefile.interdrv.param`; `cd` first. And the
+kernel's own `Module.symvers` does not exist after `modules_prepare`, so modpost
+warns about every imported symbol - harmless here, because `CONFIG_MODVERSIONS`
+is off.
+
+The script refuses to build if it does not find exactly three `wait_event` and
+one `wait_event_timeout` on `vi_th[th_id].wq`, and it disassembles the result to
+confirm four `TASK_IDLE` waits reached the object code. A patch that applies to
+the source but not to the build produces a module that loads, runs, and changes
+nothing.
+
+### Proving the rebuild is safe before it goes near the board
+
+The stock module is 619,648 bytes and the rebuild is 630,384, so they are not
+comparable by hash. Compare the interface instead:
+
+| check | stock | rebuilt |
+| --- | --- | --- |
+| vermagic | `5.10.4-tag- preempt mod_unload riscv` | same |
+| `depends` | `soph_base,soph_sys` | same |
+| undefined symbols | 121 | same 121 |
+| defined symbols | 502 | all 502, plus 202 `__UNIQUE_ID_ddebug*` |
+
+The extra symbols are dynamic-debug and module-parameter metadata, which the
+device's own config enables. Nothing the stock module defines is missing from
+the rebuild, so no module that links against `soph_vi` can lose a symbol.
+
+`osdrv/interdrv/v2/vi` has no commits since before the shipped module was built,
+so the source carries no vendor changes along with the patch.
+
+### Measured on the device
+
+| | stock | patched |
+| --- | --- | --- |
+| the four threads | `D` | `I (idle)` |
+| processes in D state | 4 | **0** |
+| `/proc/loadavg` idle | `4.06 4.10 3.99` | **`0.54 0.24 0.09`** |
+| capture pipeline errors at boot | 0 | 0 |
+| `mmf_add_vi_channel` | 3 | 3 |
+
+`mmf_add_vi_channel` is `CVI_VI_EnableChn`, the call that reports ENOMEM when the
+pipeline is contended, so three of them is the VI path working through the
+rebuilt driver.
+
+### One thing the kernel says that is not about this
+
+`dmesg` reports `soph_sys: bad vermagic: kernel tainted.` at 2.7s, and
+`/proc/sys/kernel/tainted` reads 4098. That is Sipeed's own `soph_sys.ko`,
+loaded before `soph_vi`, and it predates any rebuild. The rebuilt `soph_vi.ko`
+produces no vermagic line at all, which is the confirmation that its own magic
+matches.

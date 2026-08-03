@@ -1,0 +1,40 @@
+diff --git a/osdrv/interdrv/v2/vi/chip/mars/vi.c b/osdrv/interdrv/v2/vi/chip/mars/vi.c
+index 55285f710..a4803e302 100644
+--- a/osdrv/interdrv/v2/vi/chip/mars/vi.c
++++ b/osdrv/interdrv/v2/vi/chip/mars/vi.c
+@@ -5859,7 +5859,7 @@ static int _vi_event_handler_thread(void * arg)
+ 		_vi_update_chnRealFrameRate(&gViCtx->chnStatus[chn.s32ChnId]);
+ 		time[0] = ktime_to_timespec64(ktime_get());
+ #endif
+-		ret = wait_event_timeout(vdev->vi_th[th_id].wq,
++		ret = wait_event_idle_timeout(vdev->vi_th[th_id].wq,
+ 					vdev->vi_th[th_id].flag != 0 || kthread_should_stop(),
+ 					msecs_to_jiffies(timeout) - 1);
+ 		flag = vdev->vi_th[th_id].flag;
+@@ -6450,7 +6450,7 @@ static int _vi_err_handler_thread(void *arg)
+ 	enum E_VI_TH th_id = E_VI_TH_ERR_HANDLER;
+ 
+ 	while (1) {
+-		wait_event(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
++		wait_event_idle(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
+ 
+ 		if (vdev->vi_th[th_id].flag == 1)
+ 			err_raw_num = ISP_PRERAW_A;
+@@ -6769,7 +6769,7 @@ static int _vi_preraw_thread(void *arg)
+ 	enum E_VI_TH th_id = E_VI_TH_PRERAW;
+ 
+ 	while (1) {
+-		wait_event(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
++		wait_event_idle(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
+ 		vdev->vi_th[th_id].flag = 0;
+ 
+ 		if (kthread_should_stop()) {
+@@ -6866,7 +6866,7 @@ static int _vi_vblank_handler_thread(void *arg)
+ 	raw_num = (vdev->vi_th[th_id].flag = 1) ? ISP_PRERAW_A : ISP_PRERAW_B;
+ 
+ 	while (1) {
+-		wait_event(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
++		wait_event_idle(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
+ 		vdev->vi_th[th_id].flag = 0;
+ 
+ 		if (kthread_should_stop()) {

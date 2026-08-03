@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"NanoKVM-Server/common"
 	"NanoKVM-Server/config"
@@ -70,7 +71,9 @@ func initialize() {
 		sig := <-sigChan
 		log.Printf("\nReceived signal: %v\n", sig)
 
-		dispose()
+		if !disposeWithin(disposeTimeout, dispose) {
+			log.Printf("capture teardown did not finish in %s, exiting anyway\n", disposeTimeout)
+		}
 		os.Exit(0)
 	}()
 }
@@ -139,4 +142,38 @@ func run() {
 
 func dispose() {
 	common.GetKvmVision().Close()
+}
+
+// disposeTimeout bounds the teardown that runs when the process is asked to
+// stop. Five seconds is long enough for a pipeline that is going to release,
+// and short enough that the init script's own wait covers it.
+const disposeTimeout = 5 * time.Second
+
+// disposeWithin runs teardown and returns whether it finished before timeout.
+//
+// dispose reaches libkvm through cgo, and kvmv_deinit joins libkvm's threads.
+// One of those threads does not always return: auto_try_res spins while the
+// HDMI input is unreadable and never tests try_exit_thread, so the join waits
+// for a cable. The signal handler then never reaches os.Exit, and the process
+// stays alive after a SIGTERM while it still owns the VI pipeline.
+//
+// S95nanokvm sends that signal and starts the next server, so the survivor is
+// what makes the new one fail: its channel enable finds the carveout already
+// committed and reports ENOMEM. Leaving without a clean teardown costs one
+// leaked video buffer pool, which the driver already handles on the next start.
+// Not leaving costs the restart.
+func disposeWithin(timeout time.Duration, teardown func()) bool {
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		teardown()
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }

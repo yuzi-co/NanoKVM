@@ -61,6 +61,51 @@ prepare_runtime_state() {
     link_runtime_file state
 }
 
+# Seconds to wait for the server to exit before forcing it. Ten is longer than
+# a teardown that is going to finish, and short enough that a restart still
+# feels like one.
+STOP_TIMEOUT=${STOP_TIMEOUT:-10}
+
+# wait_for_stop waits for the services to be gone, and forces them if they are
+# not.
+#
+# killall returns as soon as the signal is sent, so the arms below used to start
+# the next server while the old one was still leaving. The server catches
+# SIGTERM and tears the capture pipeline down before it exits, and that teardown
+# reaches libkvm through cgo, where kvmv_deinit joins libkvm's threads. One of
+# those threads does not always return, so the old process can stay alive
+# indefinitely - and it still owns the VI pipeline while it does.
+#
+# The new server then builds the media stack on top of it, and the driver
+# answers "vi_sdk_enable_chn NG, Out of memory". That server dies, the old one
+# keeps serving on the old binary, and S98supervise sees a staged binary with a
+# process running and calls it healthy. A deploy that failed this way reports
+# success on every check: HTTP answers, and the process has the right name and
+# the right path.
+#
+# Call this after the staged copies are removed, not before. S98supervise reads
+# a staged binary with no process as a crash, and this wait is long enough for
+# it to start a server of its own.
+wait_for_stop() {
+    waited=0
+
+    while pidof NanoKVM-Server kvm_system > /dev/null 2>&1
+    do
+        if [ "$waited" -ge "$STOP_TIMEOUT" ]
+        then
+            # A server that will not leave is worse than one killed outright:
+            # the board keeps answering, on the build the operator replaced.
+            killall -9 kvm_system
+            killall -9 NanoKVM-Server
+            sleep 1
+            return
+        fi
+
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
 case "$1" in
   start)
     echo -n kvm > /boot/hostname.prefix
@@ -140,6 +185,7 @@ case "$1" in
     killall kvm_system
     killall NanoKVM-Server
     rm -r /tmp/kvm_system /tmp/server
+    wait_for_stop
     echo "OK"
    ;;
 
@@ -147,12 +193,17 @@ case "$1" in
     killall kvm_system
     killall NanoKVM-Server
 
-    # Start each run with an empty file, so the log always describes the server
-    # that is running now. The server is stopped, so nothing writes to the file
-    # now, and S99vidiag has already copied what it read to /data.
-    : > "$SERVER_LOG"
-
     rm -r /tmp/kvm_system /tmp/server
+
+    wait_for_stop
+
+    # Start each run with an empty file, so the log always describes the server
+    # that is running now. S99vidiag has already copied what it read to /data.
+    #
+    # Empty it after the wait, not before. The old server writes to this file
+    # while it shuts down, and what it says on the way out is the part worth
+    # having - an earlier revision truncated the file first and lost it.
+    : > "$SERVER_LOG"
 
     prepare_runtime_state
 

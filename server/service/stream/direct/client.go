@@ -20,10 +20,37 @@ const (
 	pingPeriod         = 15 * time.Second
 )
 
+// frameHeaderSize is the fixed prefix every frame carries on the wire: one
+// keyframe flag and a little-endian microsecond timestamp.
+const frameHeaderSize = 9
+
+// outboundFrame holds the encoder's frame as it came back, with no wire header
+// spliced onto it. The header is nine bytes derived from the two fields above
+// it, so building a combined buffer would mean allocating and copying the whole
+// frame a second time, for every frame, on the capture path.
 type outboundFrame struct {
 	key       bool
 	timestamp int64
-	payload   []byte
+	data      []byte
+}
+
+// header renders the prefix. The array is returned by value so it stays on the
+// caller's stack.
+func (f *outboundFrame) header() [frameHeaderSize]byte {
+	var header [frameHeaderSize]byte
+
+	if f.key {
+		header[0] = 1
+	}
+	binary.LittleEndian.PutUint64(header[1:], uint64(f.timestamp))
+
+	return header
+}
+
+// size is what the frame costs on the wire, which is what the queue budget is
+// expressed in.
+func (f *outboundFrame) size() int {
+	return frameHeaderSize + len(f.data)
 }
 
 type frameQueue struct {
@@ -134,7 +161,7 @@ func (q *frameQueue) offer(frame *outboundFrame) bool {
 			q.waitingForKeyframe = true
 			return false
 		}
-	} else if len(q.frames) >= q.maxFrames || q.queuedBytes+len(frame.payload) > q.maxBytes {
+	} else if len(q.frames) >= q.maxFrames || q.queuedBytes+frame.size() > q.maxBytes {
 		q.clearFramesLocked()
 		q.waitingForKeyframe = true
 		return false
@@ -156,7 +183,7 @@ func (q *frameQueue) popForWrite() *outboundFrame {
 	frame := q.frames[0]
 	q.frames[0] = nil
 	q.frames = q.frames[1:]
-	q.queuedBytes -= len(frame.payload)
+	q.queuedBytes -= frame.size()
 	if q.flowControlled {
 		q.inFlight = append(q.inFlight, frame.timestamp)
 	}
@@ -198,7 +225,7 @@ func (q *frameQueue) close() {
 
 func (q *frameQueue) pushLocked(frame *outboundFrame) {
 	q.frames = append(q.frames, frame)
-	q.queuedBytes += len(frame.payload)
+	q.queuedBytes += frame.size()
 }
 
 func (q *frameQueue) clearFramesLocked() {
@@ -288,19 +315,39 @@ func (c *client) handleControl(messageType int, data []byte) {
 	}
 }
 
+// newOutboundFrame takes ownership of data rather than copying it. The encoder
+// hands back a fresh slice for every frame and the streamer does not keep one,
+// so the frame is the only owner from here until the last client has written it.
 func newOutboundFrame(isKeyFrame bool, timestamp int64, data []byte) *outboundFrame {
-	payload := make([]byte, 9+len(data))
-	if isKeyFrame {
-		payload[0] = 1
-	}
-	binary.LittleEndian.PutUint64(payload[1:9], uint64(timestamp))
-	copy(payload[9:], data)
-
 	return &outboundFrame{
 		key:       isKeyFrame,
 		timestamp: timestamp,
-		payload:   payload,
+		data:      data,
 	}
+}
+
+// writeFrame sends one frame as a single binary message: the header, then the
+// encoder's buffer. Two writes into one message rather than one write into a
+// buffer built for the purpose, which would mean allocating and copying the
+// whole frame again on every frame.
+func writeFrame(conn *websocket.Conn, frame *outboundFrame) error {
+	writer, err := conn.NextWriter(websocket.BinaryMessage)
+	if err != nil {
+		return err
+	}
+
+	header := frame.header()
+	if _, err := writer.Write(header[:]); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if _, err := writer.Write(frame.data); err != nil {
+		_ = writer.Close()
+		return err
+	}
+
+	// Close is what flushes the message, so its error is the write's error.
+	return writer.Close()
 }
 
 func (c *client) writeLoop() {
@@ -325,7 +372,7 @@ func (c *client) writeLoop() {
 				c.close()
 				return
 			}
-			if err := c.conn.WriteMessage(websocket.BinaryMessage, frame.payload); err != nil {
+			if err := writeFrame(c.conn, frame); err != nil {
 				log.Debugf("failed to write h264 frame to %s: %s", c.conn.RemoteAddr(), err)
 				c.close()
 				return

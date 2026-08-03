@@ -158,6 +158,32 @@ start_usb_dev(){
             # Legacy BIOS reads no 0x55AA signature and hangs in a HLT loop.
     fi
 
+    # A serial console for the managed host, off unless /boot/usb.acm exists.
+    #
+    # This board has no recovery that does not need a person: there is no serial
+    # console on the SoC, the Cube case does not bring out the User Key, and the
+    # initramfs mass-storage mode needs a working shell - which is the thing
+    # that has failed. An ACM function closes most of that gap over the USB
+    # cable that is already connected.
+    #
+    # Everything else is present already. The kernel has CONFIG_USB_F_ACM and
+    # CONFIG_USB_CONFIGFS_ACM, /etc/inittab respawns a getty on ttyGS0, and
+    # /etc/ttyGS0_handler.sh runs login. Without this function /dev/ttyGS0 never
+    # appears and that getty respawns against nothing.
+    #
+    # It stays off by default because it is a trade, not a free win: whoever
+    # controls the managed machine gets a login prompt on the KVM. That is worth
+    # having only on a board whose root password is not the default one.
+    #
+    # Add it last. configfs numbers interfaces in link order, so a function
+    # inserted ahead of the HID ones renumbers the keyboard and the mice under a
+    # host that is already bound to them.
+    if [ -e /boot/usb.acm ]
+    then
+        mkdir functions/acm.GS0
+        ln -s functions/acm.GS0 configs/c.1
+    fi
+
     ls /sys/class/udc/ | cat > UDC
     echo device > /proc/cviusb/otg_role
 }

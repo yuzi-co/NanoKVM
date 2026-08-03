@@ -765,3 +765,86 @@ destroyed for every user, and the reload runs again.
 The probe's own messages stay out. `Cannot obtain HDMI input` prints on each pass
 of the loop that does not advance, and `Trying <w> * <h> res ..` prints for every
 mode the probe walks. Neither names a cause, and the first one has no limit.
+
+## A restart that does not wait makes the next server fail
+
+The video pipeline reports one more failure, and this one has a cause:
+
+```
+VI_SDK_IOC_S_CTRL - vi_sdk_enable_chn NG, Out of memory
+```
+
+It is not a carveout that ran out. It is two servers alive at once.
+
+`S95nanokvm restart` called `killall` and carried straight on. `killall` returns
+when the signal is sent, not when the process leaves, so the script removed
+`/tmp/server`, staged a new copy and started it while the old server was still
+running. The old server still owned the VI pipeline. The new one asked the
+driver to enable a channel that was already committed, the driver answered
+`ENOMEM`, and the new server died there.
+
+### Why the old server does not leave
+
+The handler in `main.go` calls `dispose()` and then `os.Exit(0)`. `dispose`
+reaches libkvm through cgo, and `kvmv_deinit` joins libkvm's threads. The detect
+thread spins in `auto_try_res` while the HDMI input is unreadable and never
+tests `try_exit_thread`, so the join waits for a cable and `os.Exit` is never
+reached. The process stays alive, keeps its HTTP listener, and keeps the
+pipeline.
+
+### The failure reports itself as a success
+
+This is the part worth remembering. Every check a deploy makes still passed:
+
+| check | result | why it passed |
+| --- | --- | --- |
+| `HTTP 200` | pass | the old server still listens |
+| process running | pass | the old server never exited |
+| process path is `/tmp/server/NanoKVM-Server` | pass | it is the same path |
+| `S98supervise` | healthy | a staged binary with a process running |
+| binary on disk has the new stamp | pass | the file was replaced |
+
+Only the process image disagreed. Read the stamp from there, never from the file:
+
+```shell
+P=$(pidof NanoKVM-Server)
+ls -l /proc/$P/exe                     # "(deleted)" after a restart
+strings -a /proc/$P/exe | grep -o 'dev\.2026[0-9.]*[0-9a-f]*' | head -1
+```
+
+A deploy on 2026-08-03 failed this way and was reported as successful.
+
+### The repair
+
+`wait_for_stop` polls for both processes to be gone and forces them after
+`STOP_TIMEOUT`, and `disposeWithin` bounds the teardown at five seconds and
+exits regardless. Leaving without a clean teardown costs one leaked video buffer
+pool, which the driver already handles on the next start. Not leaving costs the
+restart.
+
+Call the wait **after** the staged copies are removed, not before. `S98supervise`
+reads a staged binary with no process as a crash, and the wait is long enough for
+it to start a server of its own — which would put two servers back on the board
+by another route. `tools/vidiag/test-restart-waits.sh` checks that order.
+
+Measured after the change: a restart takes 7s, the pid changes, no force is
+needed, and the log holds no `Out of memory`.
+
+### Two traps while diagnosing this
+
+**`/proc/cvitek/vb` can wedge the reader.** While the VI stack is in the failed
+state, the read blocks in `_show_vb_status` in uninterruptible sleep. The reader
+cannot be killed and only a reboot clears it. The readings earlier in this file
+were taken on a healthy board; do not treat the file as a routine diagnostic.
+
+**Load average on this board is not a CPU signal.** The `cvitask_isp_*` kernel
+threads sit in D state permanently, so an idle board reads about 3, and each
+wedged `/proc/cvitek/vb` reader adds another. A board reading 4.7 measured 90%
+idle at the same moment.
+
+### What the record did not hold
+
+`/data/kvm-diag/vi-errors.log` reached its 200-line per-boot cap on the previous
+boot and stopped. The failure described here is not in it — it was only in
+`/tmp/nanokvm-server.log`, which the restart arm truncated. The truncation now
+runs after the wait, so what the old server says on its way out survives.

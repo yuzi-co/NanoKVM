@@ -24,14 +24,39 @@ func TestAvailableFindsTheGadgetCard(t *testing.T) {
  2 [UAC1Gadget     ]: UAC1_Gadget - UAC1_Gadget
 `)
 
+	// Override the arecord probe to report that arecord is available.
+	original := hasArecord
+	hasArecord = func() bool { return true }
+	t.Cleanup(func() { hasArecord = original })
+
 	if !Available() {
 		t.Error("Available reported false while the card is listed")
+	}
+}
+
+func TestAvailableReturnsFalseWithoutArecord(t *testing.T) {
+	writeCards(t, ` 0 [cv182xaadc     ]: cv182xa_adc - cv182xa_adc
+ 2 [UAC1Gadget     ]: UAC1_Gadget - UAC1_Gadget
+`)
+
+	// Override the arecord probe to report that arecord is not available.
+	original := hasArecord
+	hasArecord = func() bool { return false }
+	t.Cleanup(func() { hasArecord = original })
+
+	if Available() {
+		t.Error("Available reported true even though arecord is missing")
 	}
 }
 
 func TestAvailableIsFalseWithoutTheGadgetCard(t *testing.T) {
 	writeCards(t, ` 0 [cv182xaadc     ]: cv182xa_adc - cv182xa_adc
 `)
+
+	// Override the arecord probe to report that arecord is available.
+	original := hasArecord
+	hasArecord = func() bool { return true }
+	t.Cleanup(func() { hasArecord = original })
 
 	if Available() {
 		t.Error("Available reported true while only the analog codec is listed")
@@ -42,6 +67,11 @@ func TestAvailableIsFalseWhenTheFileIsMissing(t *testing.T) {
 	original := cardsPath
 	cardsPath = filepath.Join(t.TempDir(), "absent")
 	t.Cleanup(func() { cardsPath = original })
+
+	// Override the arecord probe to report that arecord is available.
+	originalArecord := hasArecord
+	hasArecord = func() bool { return true }
+	t.Cleanup(func() { hasArecord = originalArecord })
 
 	if Available() {
 		t.Error("Available reported true with no cards file at all")

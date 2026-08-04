@@ -3,15 +3,23 @@
 package audio
 
 import (
+	"io"
 	"os/exec"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // A source that gives up must end the stream by itself. If it does not, the
 // consumer blocks on a channel nothing will close, and the manager goes on
 // believing audio is being sent, so it never starts a replacement.
 func TestStreamClosesFramesWhenTheSourceGivesUp(t *testing.T) {
+	// Suppress the expected error log spam from repeated child failures.
+	original := log.StandardLogger().Out
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(original) })
+
 	stream := NewStream()
 	stream.source.minBackoff = time.Millisecond
 	stream.source.maxBackoff = time.Millisecond
@@ -38,6 +46,11 @@ func TestStreamClosesFramesWhenTheSourceGivesUp(t *testing.T) {
 
 // Stop after the source already gave up must not panic on a second close.
 func TestStreamStopIsSafeAfterTheSourceGivesUp(t *testing.T) {
+	// Suppress the expected error log spam from repeated child failures.
+	original := log.StandardLogger().Out
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(original) })
+
 	stream := NewStream()
 	stream.source.minBackoff = time.Millisecond
 	stream.source.maxBackoff = time.Millisecond

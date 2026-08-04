@@ -21,26 +21,35 @@ const cardName = "UAC1Gadget"
 // cardsPath is a variable so tests can point it at a fixture.
 var cardsPath = "/proc/asound/cards"
 
-var (
-	arecordOnce    sync.Once
-	arecordPresent bool
-)
+// hasArecord is a function variable so tests can override it. In production,
+// it checks once per process via sync.Once. Tests may assign a different
+// function to control the arecord availability independently of the card check.
+var hasArecord = func() func() bool {
+	var (
+		once    sync.Once
+		present bool
+	)
+
+	return func() bool {
+		once.Do(func() {
+			if _, err := exec.LookPath("arecord"); err != nil {
+				log.Warnf("audio is off: arecord is not installed: %s", err)
+				return
+			}
+
+			present = true
+		})
+
+		return present
+	}
+}()
 
 // Available reports whether audio can be captured right now.
 //
 // The card appears and disappears while the process runs, because the settings
 // page rebuilds the USB gadget, so this must not be cached.
 func Available() bool {
-	arecordOnce.Do(func() {
-		if _, err := exec.LookPath("arecord"); err != nil {
-			log.Warnf("audio is off: arecord is not installed: %s", err)
-			return
-		}
-
-		arecordPresent = true
-	})
-
-	if !arecordPresent {
+	if !hasArecord() {
 		return false
 	}
 
@@ -118,6 +127,11 @@ func (s *Stream) closeFrames() {
 // Killing the child is what ends the read. While the host plays nothing,
 // arecord blocks, so nothing in the read path notices that the last viewer has
 // gone.
+//
+// Calling s.source.Stop() before reading started under the mutex is critical:
+// it ensures that a Start call racing with Stop will spawn a goroutine whose
+// Run returns immediately because the source is already stopped, so consume is
+// never reached after the channel closes.
 //
 // The wait on done is what makes closing frames safe: it means the source
 // goroutine, and therefore consume, has finished. A stream that was never

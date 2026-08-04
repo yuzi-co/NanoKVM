@@ -8,10 +8,16 @@ import "sort"
 // disappear as well, and the error names whichever function happens to be
 // linked last rather than the one that overran.
 //
-// dwc2 states the number at boot:
+// The number is measured, not read. dwc2 announces
 //
 //	dwc2 4340000.usb: EPs: 8, dedicated fifos, 3072 entries in SPRAM
-const DefaultEndpointBudget = 8
+//
+// and that is not the budget. Three configurations totalling nine endpoints
+// bind and work on the device: acm+network, acm+disk+audio, and
+// disk+network+audio, each with all three HID functions. Ten fails. Deriving
+// the budget from the kernel's line looks responsible and would refuse two
+// configurations that are known good.
+const DefaultEndpointBudget = 9
 
 // hidCost is what the keyboard, the relative mouse and the absolute pointer
 // cost together: one interrupt endpoint each.
@@ -49,10 +55,7 @@ var usbFunctions = []usbFunction{
 	{name: "audio", device: "audio", markers: []string{virtualAudio}, cost: 1, priority: 10},
 }
 
-// endpointBudget is what the controller offers. The value is a constant here
-// rather than read from dmesg: the server starts long after those messages can
-// roll out of the ring buffer, and S03usbdev - which runs seconds after the
-// line is printed - is the copy that reads it.
+// endpointBudget is what the controller fits.
 func endpointBudget() int {
 	return DefaultEndpointBudget
 }
@@ -132,13 +135,12 @@ func dropOrder() []usbFunction {
 }
 
 // canEnable reports whether one more function fits, how many endpoints are
-// free, and which enabled functions would help make room.
+// free, and which enabled functions would free enough on their own.
 //
 // The suggestions are the point: an operator told only "no room" turns
 // something off, is refused again, and learns the rule by exhaustion. Only
-// functions that are actually enabled are named - a disabled one frees
-// nothing - and they come back cheapest first, so the operator gives up as
-// little as possible.
+// functions that would actually make room are named, cheapest first, so the
+// operator gives up as little as possible.
 func canEnable(device string, present func(string) bool) (bool, int, []string) {
 	wanted, ok := functionForDevice(device)
 	if !ok {
@@ -151,17 +153,17 @@ func canEnable(device string, present func(string) bool) (bool, int, []string) {
 		return true, free, nil
 	}
 
-	// A function that is not enabled frees nothing if turned off, so it is
-	// not a candidate. Every enabled function is, regardless of whether its
-	// own cost alone covers the deficit: the operator may need to give up
-	// more than one, and the cheapest-first order still minimizes what goes.
+	needed := wanted.cost - free
+
 	candidates := make([]usbFunction, 0, len(usbFunctions))
 	for _, function := range usbFunctions {
 		if function.name == wanted.name || !function.enabled(present) {
 			continue
 		}
 
-		candidates = append(candidates, function)
+		if function.cost >= needed {
+			candidates = append(candidates, function)
+		}
 	}
 
 	sort.SliceStable(candidates, func(i, j int) bool {

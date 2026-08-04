@@ -56,27 +56,37 @@ func TestHidCostsNothingWhenItIsDisabled(t *testing.T) {
 }
 
 func TestCanEnableAllowsWhatFits(t *testing.T) {
+	// hid(3) + console(3) is 6 of 9.
 	ok, free, _ := canEnable("audio", presence(virtualConsole))
 
 	if !ok {
-		t.Error("refused audio with 2 endpoints free")
+		t.Error("refused audio with 3 endpoints free")
 	}
 
-	if free != 2 {
-		t.Errorf("reported %d free, want 2", free)
+	if free != 3 {
+		t.Errorf("reported %d free, want 3", free)
+	}
+}
+
+// Measured on hardware: acm + network is 9 and binds, so the guard must allow
+// it. An earlier draft budgeted 8 and would have refused this forever.
+func TestCanEnableAllowsTheConsoleAndNetworkTogether(t *testing.T) {
+	if ok, _, _ := canEnable("network", presence(virtualConsole)); !ok {
+		t.Error("refused the network alongside the console, which binds on hardware")
 	}
 }
 
 func TestCanEnableRefusesWhatDoesNotFit(t *testing.T) {
-	// console(3) + disk(2) + hid(3) is 8, so nothing is left.
+	// console(3) + disk(2) + hid(3) is 8 of 9, so one endpoint is left and the
+	// network needs three.
 	ok, free, relief := canEnable("network", presence(virtualConsole, virtualDisk))
 
 	if ok {
-		t.Error("allowed the network with no endpoints free")
+		t.Error("allowed the network with one endpoint free")
 	}
 
-	if free != 0 {
-		t.Errorf("reported %d free, want 0", free)
+	if free != 1 {
+		t.Errorf("reported %d free, want 1", free)
 	}
 
 	// Naming something that would not free enough is worse than naming
@@ -86,10 +96,22 @@ func TestCanEnableRefusesWhatDoesNotFit(t *testing.T) {
 	}
 }
 
-// Every suggestion has to actually make room, and the cheapest sufficient one
-// comes first so the operator gives up as little as possible.
+// Every suggestion has to actually make room. Naming one that does not is worse
+// than naming none: the operator turns it off and is refused again, and learns
+// the rule by exhaustion.
 func TestCanEnableOnlySuggestsFunctionsThatFreeEnough(t *testing.T) {
-	_, _, relief := canEnable("audio", presence(virtualConsole, virtualDisk))
+	_, free, relief := canEnable("network", presence(virtualConsole, virtualDisk))
+
+	wanted, ok := endpointCost("network")
+	if !ok {
+		t.Fatal("the network is missing from the table")
+	}
+
+	needed := wanted - free
+
+	if len(relief) == 0 {
+		t.Fatal("refused the network without suggesting anything")
+	}
 
 	for _, name := range relief {
 		cost, ok := endpointCost(name)
@@ -97,8 +119,8 @@ func TestCanEnableOnlySuggestsFunctionsThatFreeEnough(t *testing.T) {
 			t.Fatalf("suggested %q, which is not a function", name)
 		}
 
-		if cost < 1 {
-			t.Errorf("suggested %q, which frees %d and does not help", name, cost)
+		if cost < needed {
+			t.Errorf("suggested %q, which frees %d of the %d needed", name, cost, needed)
 		}
 	}
 }

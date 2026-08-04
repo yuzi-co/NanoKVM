@@ -168,6 +168,20 @@ start_usb_dev(){
     if [ -e /boot/usb.uac ]
     then
         mkdir functions/uac1.usb0
+
+        # Playback off: we only ever read what the host plays. Left at the
+        # kernel default both directions are enabled, so the host also gains a
+        # USB microphone - and Windows and most Linux desktops move the default
+        # INPUT to a new USB audio device just as readily as the output. Turning
+        # on a speaker would then quietly take over the microphone on the
+        # managed machine. It also saves an isochronous endpoint on a gadget
+        # that already carries three HID functions.
+        #
+        # f_uac1 gates its IN endpoint on p_chmask, so zero removes it. If the
+        # attribute is absent on this kernel the write fails and the gadget is
+        # built the old way, which is why this does not abort the script.
+        echo 0 > functions/uac1.usb0/p_chmask 2>/dev/null
+
         ln -s functions/uac1.usb0 configs/c.1
     fi
 

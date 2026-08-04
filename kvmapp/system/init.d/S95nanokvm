@@ -77,7 +77,10 @@ prepare_runtime_state() {
 # Run this after the server is killed, or the server starts a new child. The
 # redirect hides the "no process killed" line, which is the normal case.
 stop_audio_capture() {
-    killall arecord 2>/dev/null
+    # SIGKILL, not SIGTERM. The child this exists for is one wedged in an ALSA
+    # read on a gadget that has been torn down underneath it, and that child
+    # does not answer SIGTERM. There is no state to flush.
+    killall -9 arecord 2>/dev/null
 }
 
 case "$1" in

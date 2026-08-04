@@ -20,8 +20,25 @@ const (
 
 	// restartLimit and restartWindow decide when a failing child stops being
 	// worth retrying.
-	restartLimit  = 5
+	//
+	// The limit is a wall-clock budget, not a count: the backoff doubles from
+	// minBackoff, so five attempts against a card that is simply absent are
+	// spent in about three seconds. Three seconds is not enough. Every gadget
+	// rebuild takes the card away for a moment - the audio switch itself, the
+	// virtual disk and network switches, and the USB PHY reset in
+	// service/hid - and losing that race retires capture for good, because
+	// StartAudioStream has one caller and it fires on an ICE state change that
+	// a settled connection never produces again.
+	//
+	// Eight attempts reach the 5 s cap and span about sixteen seconds, which
+	// covers a rebuild with room left over.
+	restartLimit  = 8
 	restartWindow = time.Minute
+
+	// stderrDrainTimeout bounds the wait for the child's last stderr line
+	// before we reap it. Short: the line is already written by then in every
+	// case that matters, and this sits on the teardown path.
+	stderrDrainTimeout = 200 * time.Millisecond
 
 	// minRunDuration is the minimum time a child must run to reset the failure
 	// budget. A child that emits a single chunk and exits is not a healthy
@@ -248,6 +265,17 @@ func (s *Source) runOnce(chunk []byte, handle func([]byte)) (bool, time.Duration
 
 		delivered = true
 		handle(chunk)
+	}
+
+	// Give the stderr copier a moment before reaping. cmd.Wait closes the read
+	// end of the pipe, so whatever is still buffered is discarded and the
+	// copier gets ErrFileClosed instead of the child's reason. arecord writes
+	// that reason just before it exits, so on one core the copier can still be
+	// behind us here - and the reason is the only diagnostic this feature has
+	// on a device, because Available() reports an absent card in silence.
+	select {
+	case <-copied:
+	case <-time.After(stderrDrainTimeout):
 	}
 
 	_ = cmd.Wait()

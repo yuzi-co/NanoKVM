@@ -53,10 +53,47 @@ func TestCommandsForRejectsUnknownDevices(t *testing.T) {
 	}
 }
 
+// Audio became a third case in commandsFor, and the point of that refactor was
+// that network and disk still behave exactly as they did. Checking only that
+// the lookup succeeds does not show it: a swap of virtualNetwork and
+// virtualDisk inside commandsFor would pass, and the settings switch would
+// then rebuild the USB gadget for the wrong device.
 func TestCommandsForStillHandlesNetworkAndDisk(t *testing.T) {
-	for _, device := range []string{"network", "disk"} {
-		if _, _, _, ok := commandsFor(device); !ok {
-			t.Errorf("commandsFor rejected %q", device)
+	for _, want := range []struct {
+		device  string
+		marker  string
+		mount   string
+		unmount string
+	}{
+		{"network", virtualNetwork, "touch /boot/usb.rndis0", "rndis.usb0"},
+		{"disk", virtualDisk, "touch /boot/usb.disk0", "mass_storage.disk0"},
+	} {
+		marker, mount, unmount, ok := commandsFor(want.device)
+
+		if !ok {
+			t.Errorf("commandsFor rejected %q", want.device)
+			continue
+		}
+
+		if marker != want.marker {
+			t.Errorf("%s marker is %q, want %q", want.device, marker, want.marker)
+		}
+
+		if len(mount) == 0 || mount[0] != want.mount {
+			t.Errorf("%s mount commands are %v, want the first to be %q",
+				want.device, mount, want.mount)
+		}
+
+		var removesLink bool
+		for _, command := range unmount {
+			if strings.Contains(command, want.unmount) {
+				removesLink = true
+			}
+		}
+
+		if !removesLink {
+			t.Errorf("%s unmount commands are %v, want one naming %q",
+				want.device, unmount, want.unmount)
 		}
 	}
 }

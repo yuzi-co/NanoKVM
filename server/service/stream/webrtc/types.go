@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"NanoKVM-Server/service/stream"
+	"NanoKVM-Server/service/stream/audio"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
@@ -22,6 +23,10 @@ type WebRTCManager struct {
 	// packets handed to every client, rather than each client paying to
 	// packetize and copy the same frame again.
 	videoPacketizer rtp.Packetizer
+
+	audioSending    bool
+	audioStream     *audio.Stream
+	audioPacketizer rtp.Packetizer
 }
 
 type Client struct {

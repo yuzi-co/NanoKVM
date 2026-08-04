@@ -38,22 +38,45 @@ func NewWebRTCManager() *WebRTCManager {
 			rtp.NewRandomSequencer(),
 			clockRate,
 		),
+		audioPacketizer: rtp.NewPacketizer(
+			rtpMTU,
+			audioPayloadType,
+			audioSSRC,
+			&codecs.G711Payloader{},
+			rtp.NewRandomSequencer(),
+			audioClockRate,
+		),
 	}
 	m.updateClientSnapshotLocked()
 
 	return m
 }
 
-func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
-	go client.write()
-	go client.writeAudio()
-
+// storeClient records the client and reports whether it is new to the manager.
+func (m *WebRTCManager) storeClient(ws *websocket.Conn, client *Client) (int, uint64, bool) {
 	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	_, exists := m.clients[ws]
 	m.clients[ws] = client
+
 	count := m.updateClientSnapshotLocked()
 	m.viewerVersion++
-	version := m.viewerVersion
-	m.mutex.Unlock()
+
+	return count, m.viewerVersion, !exists
+}
+
+func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
+	count, version, isNew := m.storeClient(ws, client)
+
+	// ICE reaches Connected and then Completed, and signalling calls this on
+	// both. Starting the writers twice would put two goroutines on one slot,
+	// and the second close of the done channel panics the server.
+	if isNew {
+		go client.write()
+		go client.writeAudio()
+	}
+
 	vm.UpdateHdmiViewerSnapshot("webrtc", count, version)
 
 	log.Debugf("added client %s, total clients: %d", ws.RemoteAddr(), count)
@@ -72,6 +95,8 @@ func (m *WebRTCManager) RemoveClient(ws *websocket.Conn) {
 	if exists {
 		client.stop()
 	}
+
+	m.stopAudioStreamIfIdle()
 
 	log.Debugf("removed client %s, total clients: %d", ws.RemoteAddr(), count)
 }

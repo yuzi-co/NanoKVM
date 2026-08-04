@@ -126,6 +126,106 @@ func TestRemoveClientReturnsAfterAddClientStartsTheWriters(t *testing.T) {
 	}
 }
 
+// newConnectedTestConn returns the server side of a live websocket
+// connection, the same way TestRemoveClientReturnsAfterAddClientStartsTheWriters
+// builds one. AddClient logs ws.RemoteAddr(), so a real connection is needed
+// rather than a bare struct.
+func newConnectedTestConn(t *testing.T) *websocket.Conn {
+	t.Helper()
+
+	upgrade := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	accepted := make(chan *websocket.Conn, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrade.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		accepted <- conn
+	}))
+	t.Cleanup(server.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	dialerConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = dialerConn.Close() })
+
+	serverConn := <-accepted
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	return serverConn
+}
+
+// ICE reports Connected and then Completed for an ordinary handshake, and
+// signalling calls AddClient on both. This drives the real AddClient path,
+// not the storeClient helper, so it would fail to catch a regression where
+// AddClient ignored the guard entirely.
+func TestAddClientTwiceInARowDoesNotPanic(t *testing.T) {
+	conn := newConnectedTestConn(t)
+
+	client := NewClient(conn, nil)
+	client.track, _ = newTestTrack(5)
+
+	manager := NewWebRTCManager()
+
+	manager.AddClient(conn, client)
+	manager.AddClient(conn, client)
+
+	done := make(chan struct{})
+	go func() {
+		manager.RemoveClient(conn)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RemoveClient did not return within 2s after a repeated AddClient")
+	}
+
+	// Give a wrongly-duplicated writer a moment to reach the closed slot and
+	// panic before the test exits.
+	time.Sleep(100 * time.Millisecond)
+}
+
+// ICE can flap Connected -> Disconnected -> Connected on a transient network
+// blip. The middle state drives RemoveClient, which closes both slots and
+// waits for both writers to exit; recovery then calls AddClient again with
+// the same *Client pointer. Gating the writer start on the manager's map
+// (keyed by the websocket, which RemoveClient just deleted) would start them
+// a second time: each writer's first Take() would return immediately from the
+// already-closed slot and run its "defer close" on an already-closed channel.
+func TestAddClientAfterRemoveClientDoesNotPanic(t *testing.T) {
+	conn := newConnectedTestConn(t)
+
+	client := NewClient(conn, nil)
+	client.track, _ = newTestTrack(5)
+
+	manager := NewWebRTCManager()
+
+	manager.AddClient(conn, client)
+	manager.RemoveClient(conn)
+
+	done := make(chan struct{})
+	go func() {
+		manager.AddClient(conn, client)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("AddClient did not return within 2s after a reconnect")
+	}
+
+	// Give a wrongly-restarted writer a moment to reach the closed slot and
+	// panic before the test exits.
+	time.Sleep(100 * time.Millisecond)
+}
+
 func TestStartAudioStreamDoesNothingWithoutClients(t *testing.T) {
 	manager := NewWebRTCManager()
 
@@ -193,6 +293,40 @@ func TestHasAudioListenerIgnoresClientsWithoutAnAudioTrack(t *testing.T) {
 
 	if !manager.hasAudioListener() {
 		t.Error("a client with an audio track was not counted as a listener")
+	}
+}
+
+// The stream-lifecycle tests below stop the stream before calling the send
+// loop, so the packetize-and-fan-out step never runs there. This test drives
+// that step directly, bypassing the capture channel, so a nil packetizer or a
+// wrong sample count would not sail through untested. It also checks that a
+// client without an audio track is skipped, not handed a frame it can only
+// discard.
+func TestDeliverAudioFrameReachesOnlyClientsWithAudio(t *testing.T) {
+	manager := NewWebRTCManager()
+
+	videoOnly := newTestClient()
+	manager.storeClient(&websocket.Conn{}, videoOnly)
+
+	withAudio := newTestClient()
+	withAudio.mutex.Lock()
+	withAudio.track.audio = &recordingWriter{}
+	withAudio.mutex.Unlock()
+	manager.storeClient(&websocket.Conn{}, withAudio)
+
+	manager.deliverAudioFrame(make([]byte, audio.FrameSamples))
+
+	if videoOnly.audioSlot.Pending() {
+		t.Error("a client without an audio track was handed a frame")
+	}
+
+	packets, ok := withAudio.audioSlot.Take()
+	if !ok {
+		t.Fatal("the audio slot delivered nothing")
+	}
+
+	if len(packets) == 0 {
+		t.Fatal("packetize produced no RTP packets for a 20ms frame")
 	}
 }
 

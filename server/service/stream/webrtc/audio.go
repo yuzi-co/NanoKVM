@@ -98,11 +98,7 @@ func (m *WebRTCManager) stopAudioStreamIfIdle() {
 // client, the same way the video loop does.
 func (m *WebRTCManager) sendAudioStream(stream *audio.Stream) {
 	for frame := range stream.Frames() {
-		packets := m.audioPacketizer.Packetize(frame, audio.FrameSamples)
-
-		for _, client := range m.getClients() {
-			client.enqueueAudio(packets)
-		}
+		m.deliverAudioFrame(frame)
 	}
 
 	// The channel closed. Either the last viewer left and stopAudioStreamIfIdle
@@ -110,4 +106,25 @@ func (m *WebRTCManager) sendAudioStream(stream *audio.Stream) {
 	// The second case leaves the flag set unless it is cleared here, and then
 	// audio never recovers for the life of the process.
 	m.clearAudioStream(stream)
+}
+
+// deliverAudioFrame packetizes one frame and hands the packets to every
+// client that negotiated audio. Split out from sendAudioStream so the
+// packetize-and-fan-out step can be tested directly, without a live capture
+// stream behind it.
+//
+// A client whose track has no audio leg is skipped rather than enqueued and
+// dropped: enqueueAudio would still take the slot lock and wake that client's
+// writer for a frame it can only discard, fifty times a second, for as long
+// as anyone else is listening.
+func (m *WebRTCManager) deliverAudioFrame(frame []byte) {
+	packets := m.audioPacketizer.Packetize(frame, audio.FrameSamples)
+
+	for _, client := range m.getClients() {
+		if !client.hasAudioTrack() {
+			continue
+		}
+
+		client.enqueueAudio(packets)
+	}
 }

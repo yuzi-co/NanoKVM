@@ -52,7 +52,11 @@ func NewWebRTCManager() *WebRTCManager {
 	return m
 }
 
-// storeClient records the client and reports whether it is new to the manager.
+// storeClient records the client and reports whether it is new to the
+// manager's map. The bool is bookkeeping only now: it does not gate the
+// writer start, because a reconnect reuses the same *Client after
+// RemoveClient deleted its map entry, and the map alone cannot tell that
+// apart from a client the manager has never seen. See Client.startWriters.
 func (m *WebRTCManager) storeClient(ws *websocket.Conn, client *Client) (int, uint64, bool) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -67,15 +71,16 @@ func (m *WebRTCManager) storeClient(ws *websocket.Conn, client *Client) (int, ui
 }
 
 func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
-	count, version, isNew := m.storeClient(ws, client)
+	count, version, _ := m.storeClient(ws, client)
 
-	// ICE reaches Connected and then Completed, and signalling calls this on
-	// both. Starting the writers twice would put two goroutines on one slot,
-	// and the second close of the done channel panics the server.
-	if isNew {
-		go client.write()
-		go client.writeAudio()
-	}
+	// The writer-start guard lives on the Client, not here: ICE reaches
+	// Connected and then Completed for one handshake, and can also flap
+	// Connected -> Disconnected -> Connected on a blip, and signalling calls
+	// AddClient on all of them, sometimes with the same *Client after
+	// RemoveClient already closed its slots. Starting the writers twice would
+	// put two goroutines on one slot, and the second close of the done
+	// channel panics the server.
+	client.startWriters()
 
 	vm.UpdateHdmiViewerSnapshot("webrtc", count, version)
 

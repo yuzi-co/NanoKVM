@@ -5,13 +5,8 @@
 
 ## Problem
 
-The USB controller on the SG2002 has eight endpoints. `dmesg` states it at boot:
-
-```
-dwc2 4340000.usb: EPs: 8, dedicated fifos, 3072 entries in SPRAM
-```
-
-Nothing in the product knows that. `Settings > Device` offers three switches, `S03usbdev` reads
+The USB controller on the SG2002 fits nine endpoints of gadget functions. Nothing in the product
+knows that. `Settings > Device` offers three switches, `S03usbdev` reads
 five `/boot/usb.*` markers, and none of them counts anything. Enabling the fourth function
 overruns the controller, the gadget refuses to bind, and **every USB function dies together** —
 including the keyboard and both mice, which are the reason the device exists.
@@ -47,9 +42,36 @@ Two properties make this worse than a single broken feature:
 | `mass_storage.disk0` disk | 2 | `/boot/usb.disk0` |
 | `uac1.usb0` speaker | 1 | `/boot/usb.uac` |
 
-HID takes 3 and leaves 5. At most two extra functions fit, and some pairs do not:
-`acm + disk` is exactly 8, `acm + audio` is 7, `disk + network` is exactly 8,
-`acm + network` is 9 and does not fit.
+HID takes 3 and leaves 6.
+
+### How the budget was established
+
+The number is measured, not read. `dmesg` reports `dwc2 4340000.usb: EPs: 8, dedicated fifos,
+3072 entries in SPRAM`, and **that is not the number that governs** — three separate configurations
+totalling nine endpoints bind and work. A guard that trusted the kernel's line would refuse
+`acm + network` and `acm + disk + audio` forever, and both are known good.
+
+Six configurations were built on the device on 2026-08-04, each by writing markers and rebooting:
+
+| Set (HID always present) | Total | Result |
+| --- | --- | --- |
+| `acm + audio` | 7 | binds |
+| `acm + network` | 9 | binds |
+| `acm + disk + audio` | 9 | binds |
+| `disk + network + audio` | 9 | binds |
+| `acm + network + audio` | 10 | fails, `-19` |
+| `acm + disk + network + audio` | 12 | fails, `-19` |
+
+Nine binds three times, ten fails. The per-function costs above come from the USB descriptors and
+are consistent with every one of these points.
+
+Two models were eliminated by measurement. "Total endpoints, budget 8" predicts `acm + network`
+fails; it binds. "Only IN endpoints are scarce" predicts `acm + network + audio` binds, because
+the speaker's single endpoint is an isochronous OUT; it fails. Total endpoints against a budget
+of nine is the simplest model that fits all six.
+
+Three of the four optional functions therefore fit, in two combinations: `acm + disk + audio` or
+`disk + network + audio`. The console and the network cannot both be on with anything else added.
 
 ## Scope
 
@@ -98,8 +120,9 @@ that reboots with too many markers must still come up with HID.
 something else off, the dropped function returns on its own. A guard that rewrites configuration
 behind the operator is a second way to lose settings, and this device already loses enough.
 
-The budget is read from `dmesg` (`EPs: <n>`) when that line is present, and falls back to 8. A
-different SoC revision then gets the right number instead of a wrong constant.
+The budget is the constant 9. It is deliberately **not** read from `dmesg`: that line reports 8,
+and three measured configurations of nine endpoints bind. Parsing it would install a wrong number
+on every board and refuse configurations that work.
 
 Link order already matters for an unrelated reason: configfs numbers interfaces in link order, and
 a function inserted ahead of the HID ones renumbers the keyboard and the mice under a host that is
@@ -197,7 +220,8 @@ budget block from `S03usbdev` and drive it with marker sets.
 
 - HID alone fits, and nothing is dropped.
 - `acm + audio` = 7, nothing dropped.
-- `acm + disk` = 8 exactly, nothing dropped.
+- `acm + disk + audio` = 9 exactly, nothing dropped.
+- `acm + network` = 9 exactly, nothing dropped.
 - `acm + disk + network + audio` = 12, drops audio then network, keeps `acm + disk` at 8.
 - Every drop is logged.
 - No marker file is removed by any case.
@@ -248,5 +272,14 @@ strictly better than changing something they did not ask about.
 **Delete markers when dropping.** Rejected: it destroys the operator's stated intent and makes the
 drop permanent, so turning off one function would not bring back the one it displaced.
 
-**Query the budget from the kernel at run time.** Rejected: no interface exposes it. The `dmesg`
-line is the closest available, and it is used with a fallback.
+**Read the budget from the kernel's `dmesg` line.** Rejected after measurement, and this is the
+alternative worth recording, because it was the original design and it looked like the responsible
+choice. `dwc2` announces `EPs: 8`. Deriving the budget from it is wrong: nine endpoints bind, in
+three separate configurations. Taking the number from the one apparently authoritative source
+would have shipped a guard that permanently refused `acm + network` and `acm + disk + audio`,
+with a comment explaining that it was reading the real value from the hardware.
+
+The lesson is narrow and worth keeping: `EPs: 8` counts something — probably the controller's
+device endpoint hardware, before whatever the composite layer does with EP0 and shared
+directions — but it does not count what this guard has to count. A measured constant with the
+measurements written down beats a derived number nobody checked.

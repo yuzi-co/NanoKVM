@@ -10,7 +10,8 @@
 
 ## Global Constraints
 
-- Endpoint budget is **8**, read from `dmesg` (`dwc2ate: EPs: <n>`) with a fallback to 8.
+- Endpoint budget is the constant **9**. Do **not** read it from `dmesg`: that line says `EPs: 8`,
+  and three measured configurations totalling 9 bind and work. Parsing it refuses valid setups.
 - Endpoint costs, exact: `console 3`, `network 3`, `disk 2`, `audio 1`, HID 3 total.
 - Priority, highest first: `HID > console > disk > network > audio`. Audio drops first.
 - HID is never a drop candidate, at any input.
@@ -23,6 +24,24 @@
 - Init scripts must be LF. A CRLF init script does not run on the device.
 
 ---
+
+## The budget is measured, and the measurements are the reason
+
+Six configurations were built on the device, each by writing markers and rebooting. HID is present
+in all of them.
+
+| Set | Total | Result |
+| --- | --- | --- |
+| `acm + audio` | 7 | binds |
+| `acm + network` | 9 | binds |
+| `acm + disk + audio` | 9 | binds |
+| `disk + network + audio` | 9 | binds |
+| `acm + network + audio` | 10 | fails, `-19` |
+| `acm + disk + network + audio` | 12 | fails, `-19` |
+
+Nine binds three times; ten fails. Do not "improve" this by reading the controller's own number
+out of `dmesg` — it reports 8, and doing so refuses `acm + network` and `acm + disk + audio`,
+both of which are known good.
 
 ## Deviation from the spec, flagged
 
@@ -130,27 +149,37 @@ func TestHidCostsNothingWhenItIsDisabled(t *testing.T) {
 }
 
 func TestCanEnableAllowsWhatFits(t *testing.T) {
+	// hid(3) + console(3) is 6 of 9.
 	ok, free, _ := canEnable("audio", presence(virtualConsole))
 
 	if !ok {
-		t.Error("refused audio with 2 endpoints free")
+		t.Error("refused audio with 3 endpoints free")
 	}
 
-	if free != 2 {
-		t.Errorf("reported %d free, want 2", free)
+	if free != 3 {
+		t.Errorf("reported %d free, want 3", free)
+	}
+}
+
+// Measured on hardware: acm + network is 9 and binds, so the guard must allow
+// it. An earlier draft budgeted 8 and would have refused this forever.
+func TestCanEnableAllowsTheConsoleAndNetworkTogether(t *testing.T) {
+	if ok, _, _ := canEnable("network", presence(virtualConsole)); !ok {
+		t.Error("refused the network alongside the console, which binds on hardware")
 	}
 }
 
 func TestCanEnableRefusesWhatDoesNotFit(t *testing.T) {
-	// console(3) + disk(2) + hid(3) is 8, so nothing is left.
+	// console(3) + disk(2) + hid(3) is 8 of 9, so one endpoint is left and the
+	// network needs three.
 	ok, free, relief := canEnable("network", presence(virtualConsole, virtualDisk))
 
 	if ok {
-		t.Error("allowed the network with no endpoints free")
+		t.Error("allowed the network with one endpoint free")
 	}
 
-	if free != 0 {
-		t.Errorf("reported %d free, want 0", free)
+	if free != 1 {
+		t.Errorf("reported %d free, want 1", free)
 	}
 
 	// Naming something that would not free enough is worse than naming
@@ -160,10 +189,22 @@ func TestCanEnableRefusesWhatDoesNotFit(t *testing.T) {
 	}
 }
 
-// Every suggestion has to actually make room, and the cheapest sufficient one
-// comes first so the operator gives up as little as possible.
+// Every suggestion has to actually make room. Naming one that does not is worse
+// than naming none: the operator turns it off and is refused again, and learns
+// the rule by exhaustion.
 func TestCanEnableOnlySuggestsFunctionsThatFreeEnough(t *testing.T) {
-	_, _, relief := canEnable("audio", presence(virtualConsole, virtualDisk))
+	_, free, relief := canEnable("network", presence(virtualConsole, virtualDisk))
+
+	wanted, ok := endpointCost("network")
+	if !ok {
+		t.Fatal("the network is missing from the table")
+	}
+
+	needed := wanted - free
+
+	if len(relief) == 0 {
+		t.Fatal("refused the network without suggesting anything")
+	}
 
 	for _, name := range relief {
 		cost, ok := endpointCost(name)
@@ -171,8 +212,8 @@ func TestCanEnableOnlySuggestsFunctionsThatFreeEnough(t *testing.T) {
 			t.Fatalf("suggested %q, which is not a function", name)
 		}
 
-		if cost < 1 {
-			t.Errorf("suggested %q, which frees %d and does not help", name, cost)
+		if cost < needed {
+			t.Errorf("suggested %q, which frees %d of the %d needed", name, cost, needed)
 		}
 	}
 }
@@ -231,10 +272,16 @@ import "sort"
 // disappear as well, and the error names whichever function happens to be
 // linked last rather than the one that overran.
 //
-// dwc2 states the number at boot:
+// The number is measured, not read. dwc2 announces
 //
 //	dwc2 4340000.usb: EPs: 8, dedicated fifos, 3072 entries in SPRAM
-const DefaultEndpointBudget = 8
+//
+// and that is not the budget. Three configurations totalling nine endpoints
+// bind and work on the device: acm+network, acm+disk+audio, and
+// disk+network+audio, each with all three HID functions. Ten fails. Deriving
+// the budget from the kernel's line looks responsible and would refuse two
+// configurations that are known good.
+const DefaultEndpointBudget = 9
 
 // hidCost is what the keyboard, the relative mouse and the absolute pointer
 // cost together: one interrupt endpoint each.
@@ -272,10 +319,7 @@ var usbFunctions = []usbFunction{
 	{name: "audio", device: "audio", markers: []string{virtualAudio}, cost: 1, priority: 10},
 }
 
-// endpointBudget is what the controller offers. The value is a constant here
-// rather than read from dmesg: the server starts long after those messages can
-// roll out of the ring buffer, and S03usbdev - which runs seconds after the
-// line is printed - is the copy that reads it.
+// endpointBudget is what the controller fits.
 func endpointBudget() int {
 	return DefaultEndpointBudget
 }
@@ -427,11 +471,13 @@ git commit -m "Count what each USB function costs the controller"
 - Produces, inside a block delimited by `# --- endpoint budget ---` and `# --- end endpoint budget ---`:
   - `usb_budget()` — prints the controller's endpoint count
   - `usb_cost <name>` — prints one function's cost
-  - `usb_drop_order()` — prints optional function names, lowest priority first
+  - `usb_keep_order()` — prints optional function names, highest priority first
+  - `usb_drop_order()` — the same ranking reversed, lowest priority first
+  - `usb_has "<names>" <name>` — whether a name is in a set
   - `usb_hid_cost()` — prints HID's cost
   - `usb_used "<names>"` — prints the total for a space-separated set
   - `usb_enabled()` — prints the set the markers ask for
-  - `usb_resolve "<names>" <budget>` — prints the subset that fits
+  - `usb_resolve "<names>" <budget>` — prints the subset that fits, in priority order
   - `usb_dropped "<wanted>" "<kept>"` — prints what was given up
 
 - [ ] **Step 1: Write the failing test**
@@ -470,7 +516,7 @@ cost_case audio   1
 cost_case nonsense 0
 
 echo
-echo "===== the total, against a budget of 8 ====="
+echo "===== the total, against a budget of 9 ====="
 # HID is three of the eight before anything optional is added, so only two
 # optional functions ever fit and some pairs do not.
 used_case() {
@@ -491,22 +537,50 @@ echo "===== resolving a set that does not fit ====="
 # the only way into a board whose network is gone.
 resolve_case() {
     desc="$1"; set="$2"; want="$3"
-    got=$(WORK="$WORK" HID=3 sh -c '. "$WORK/budget.sh"; usb_hid_cost() { echo "$HID"; }; usb_resolve "'"$set"'" 8')
+    got=$(WORK="$WORK" HID=3 sh -c '. "$WORK/budget.sh"; usb_hid_cost() { echo "$HID"; }; usb_resolve "'"$set"'" 9')
     [ "$got" = "$want" ] && note "$desc -> [$got]" OK || note "$desc -> [$got], want [$want]" FAIL
 }
-resolve_case "everything drops to console + disk" "console disk network audio" "console disk"
-resolve_case "console + audio already fits"       "console audio"              "console audio"
-resolve_case "console + disk is exactly 8"        "console disk"               "console disk"
-resolve_case "disk + network is exactly 8"        "disk network"               "disk network"
-resolve_case "console + network drops the network" "console network"           "console"
-resolve_case "nothing enabled stays nothing"      ""                           ""
+# Everything enabled keeps three of the four. Giving up the lowest priority
+# members instead would settle on console+disk and leave an endpoint unused,
+# losing audio for nothing.
+resolve_case "everything keeps console + disk + audio" "console disk network audio" "console disk audio"
+resolve_case "console + audio already fits"            "console audio"              "console audio"
+resolve_case "console + disk + audio is exactly 9"     "console disk audio"         "console disk audio"
+resolve_case "disk + network + audio is exactly 9"     "disk network audio"         "disk network audio"
+resolve_case "console + network is exactly 9"          "console network"            "console network"
+resolve_case "adding audio to those two costs audio"   "console network audio"      "console network"
+resolve_case "nothing enabled stays nothing"           ""                           ""
+
+# The output is in priority order regardless of how the set arrived, because
+# configfs numbers interfaces in link order and the caller links what this
+# prints.
+resolve_case "the result is ordered, not as given"     "audio disk console"         "console disk audio"
+
+# A lower priority function must never take a place from a higher one. The
+# console costs 3 and audio costs 1, so a resolve that filled cheaply first
+# would keep audio and drop the console - the exact inversion that leaves a
+# board with no way in when its network dies.
+got=$(WORK="$WORK" HID=3 sh -c '. "$WORK/budget.sh"; usb_hid_cost() { echo "$HID"; }; usb_resolve "console network audio" 9')
+case " $got " in
+    *" console "*) note "the console outranks audio for the last place" OK ;;
+    *)             note "the console lost its place to a cheaper function" FAIL ;;
+esac
+
+echo
+echo "===== the two orderings are one ranking ====="
+keep=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; usb_keep_order')
+drop=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; usb_drop_order')
+reversed=$(for name in $keep; do echo "$name"; done | sed '1!G;h;$!d' | tr '\n' ' ')
+[ "$(echo $reversed)" = "$(echo $drop)" ] \
+    && note "drop order is the keep order reversed" OK \
+    || note "keep [$keep] reversed is [$reversed], drop says [$drop]" FAIL
 
 echo
 echo "===== HID is never a candidate ====="
 # The one rule with no exception. A board that gives up HID has given up being
 # a KVM, so no combination of markers may reach that state.
 for set in "console disk network audio" "console network" "disk network audio"; do
-    got=$(WORK="$WORK" HID=3 sh -c '. "$WORK/budget.sh"; usb_hid_cost() { echo "$HID"; }; usb_resolve "'"$set"'" 8')
+    got=$(WORK="$WORK" HID=3 sh -c '. "$WORK/budget.sh"; usb_hid_cost() { echo "$HID"; }; usb_resolve "'"$set"'" 9')
     case "$got" in
         *hid*) note "resolving [$set] dropped hid" FAIL ;;
         *)     note "resolving [$set] keeps hid" OK ;;
@@ -530,20 +604,24 @@ got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; usb_dropped "console audio" "cons
 [ -z "$got" ] && note "nothing dropped when everything fits" OK || note "dropped [$got], want nothing" FAIL
 
 echo
-echo "===== the budget comes from the controller ====="
-# dmesg states it at boot. A board that does not print the line, or prints
-# something unparseable, falls back rather than computing with a blank.
-got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; dmesg() { echo "[ 0.5] dwc2 4340000.usb: EPs: 8, dedicated fifos, 3072 entries in SPRAM"; }; usb_budget')
-[ "$got" = 8 ] && note "reads EPs: 8 from dmesg" OK || note "read [$got] from dmesg, want 8" FAIL
+echo "===== the budget is the measured constant, not the kernel's ====="
+# dwc2 announces "EPs: 8" and that is not the budget: acm+network is nine
+# endpoints and binds, as does acm+disk+audio. Reading the kernel's number
+# would refuse both. The guard must not consult dmesg at all.
+got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; usb_budget')
+[ "$got" = 9 ] && note "the budget is 9" OK || note "the budget is [$got], want 9" FAIL
 
-got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; dmesg() { echo "[ 0.5] dwc2 4340000.usb: EPs: 12, dedicated fifos"; }; usb_budget')
-[ "$got" = 12 ] && note "a different controller reports its own number" OK || note "read [$got], want 12" FAIL
+if grep -q dmesg "$WORK/budget.sh"; then
+    note "usb_budget consults dmesg, which reports the wrong number" FAIL
+else
+    note "the budget never consults dmesg" OK
+fi
 
-got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; dmesg() { echo "nothing useful here"; }; usb_budget')
-[ "$got" = 8 ] && note "falls back to 8 when the line is absent" OK || note "read [$got], want 8" FAIL
-
-got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; dmesg() { return 1; }; usb_budget')
-[ "$got" = 8 ] && note "falls back to 8 when dmesg cannot run" OK || note "read [$got], want 8" FAIL
+# A board that reports something else must not change the answer, because the
+# answer was measured on this hardware and the kernel's line disagrees with it.
+got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; dmesg() { echo "dwc2 4340000.usb: EPs: 8, dedicated fifos"; }; usb_budget')
+[ "$got" = 9 ] && note "a dmesg line saying 8 does not move the budget" OK \
+               || note "dmesg moved the budget to [$got]" FAIL
 
 echo
 echo "===== the network is one function, whichever marker names it ====="
@@ -617,7 +695,7 @@ Insert immediately **before** `start_usb_dev(){` in `kvmapp/system/init.d/S03usb
 #   configfs-gadget 4340000.usb: failed to start g0: -19
 #
 # So count first and link second. When more is enabled than fits, give up the
-# lowest priority function: nobody is present at boot to be asked, and coming up
+# lower priority function its place: nobody is present at boot to be asked, and coming up
 # without a keyboard is the worst available outcome.
 #
 # Never delete the marker of a function that is given up. The operator's intent
@@ -628,21 +706,23 @@ usb_marker() {
     [ -e "/boot/$1" ]
 }
 
-# usb_budget asks the controller. dwc2 prints the number a few seconds before
-# this script runs:
+# usb_budget is how many endpoints of functions this controller fits.
+#
+# The number is measured, not read. dwc2 prints its own count a few seconds
+# before this script runs:
 #
 #   dwc2 4340000.usb: EPs: 8, dedicated fifos, 3072 entries in SPRAM
 #
-# A board that prints nothing usable falls back to 8 rather than computing with
-# a blank, which would make every function look free.
+# That is not the budget. Configurations totalling nine endpoints bind and work
+# - acm+network, acm+disk+audio, and disk+network+audio, each with all three
+# HID functions - and ten fails. Parsing the kernel's line looks like the
+# careful thing to do and would permanently refuse two configurations that are
+# known good, with a comment claiming it read the real value from the hardware.
+#
+# Leave this as a constant. If a future controller differs, measure it the same
+# way and change the number here.
 usb_budget() {
-    budget=$(dmesg 2>/dev/null | sed -n 's/.*: EPs: \([0-9][0-9]*\).*/\1/p' | head -n 1)
-
-    case "$budget" in
-        '' | *[!0-9]*) budget=8 ;;
-    esac
-
-    echo "$budget"
+    echo 9
 }
 
 # usb_hid_cost charges nothing when HID is switched off, because those endpoints
@@ -666,12 +746,18 @@ usb_cost() {
     esac
 }
 
-# usb_drop_order lists the optional functions lowest priority first, which is
-# the order they are given up in.
+# usb_keep_order lists the optional functions highest priority first, which is
+# the order they are offered a place.
 #
 # The console ranks above the disk and the network because it is the only way
-# into a board whose network is gone. Audio goes first: it is the only entry
+# into a board whose network is gone. Audio ranks last: it is the only entry
 # that costs nothing to lose.
+usb_keep_order() {
+    echo "console disk network audio"
+}
+
+# usb_drop_order is the same ranking read backwards. It is what the Go copy of
+# the table is compared against, and a test asserts the two are exact reverses.
 usb_drop_order() {
     echo "audio network disk console"
 }
@@ -700,31 +786,42 @@ usb_used() {
     echo "$used"
 }
 
-# usb_without prints a set with one name taken out.
-usb_without() {
-    out=""
+# usb_has answers whether a name is in a set.
+usb_has() {
+    case " $1 " in
+        *" $2 "*) return 0 ;;
+    esac
 
-    for name in $1
-    do
-        [ "$name" = "$2" ] || out="$out $name"
-    done
-
-    echo $out
+    return 1
 }
 
 # usb_resolve prints the subset of the enabled set that fits the budget.
 #
-# It walks the drop order rather than looping until the total is small enough,
-# so it always terminates: the list is finite, and a budget too small for
-# anything optional simply empties the set instead of spinning.
+# It offers each function a place in priority order and keeps the ones that
+# still fit, rather than giving up the lowest priority members until the total
+# comes down. The two agree on which function outranks which and disagree on
+# the result: with everything enabled, giving up in order loses audio, then the
+# network, and settles on console+disk at five of the six optional endpoints -
+# while console+disk+audio is exactly six and keeps one function more. Offering
+# places never leaves room unused, and it cannot promote a lower priority
+# function over a higher one, because the higher one was offered first.
+#
+# It always terminates: the list is finite and each entry is considered once. A
+# budget too small for anything optional simply yields an empty set.
 usb_resolve() {
-    keep=$1
+    enabled=$1
     budget=$2
 
-    for victim in $(usb_drop_order)
+    keep=""
+
+    for name in $(usb_keep_order)
     do
-        [ "$(usb_used "$keep")" -le "$budget" ] && break
-        keep=$(usb_without "$keep" "$victim")
+        usb_has "$enabled" "$name" || continue
+
+        if [ "$(usb_used "$keep $name")" -le "$budget" ]
+        then
+            keep="$keep $name"
+        fi
     done
 
     echo $keep
@@ -800,11 +897,7 @@ Then add this helper directly below the block above:
 ```sh
     # usb_kept answers whether a function survived the budget.
     usb_kept() {
-        case " $usb_keep " in
-            *" $1 "*) return 0 ;;
-        esac
-
-        return 1
+        usb_has "$usb_keep" "$1"
     }
 ```
 
@@ -1077,12 +1170,36 @@ func TestShellAndGoAgreeOnWhatHidCosts(t *testing.T) {
 func TestShellAndGoAgreeOnTheFallbackBudget(t *testing.T) {
 	script := readInitScript(t)
 
-	if !strings.Contains(script, "budget=8") {
-		t.Errorf("S03usbdev does not fall back to %d", DefaultEndpointBudget)
+	budget := regexp.MustCompile(`usb_budget\(\) \{\s*echo (\d+)`).FindStringSubmatch(script)
+	if budget == nil {
+		t.Fatal("S03usbdev has no usb_budget function, or it does not echo a constant")
 	}
 
-	if DefaultEndpointBudget != 8 {
-		t.Errorf("DefaultEndpointBudget is %d, but S03usbdev falls back to 8", DefaultEndpointBudget)
+	shell, err := strconv.Atoi(budget[1])
+	if err != nil {
+		t.Fatalf("usb_budget echoes %q, which is not a number", budget[1])
+	}
+
+	if shell != DefaultEndpointBudget {
+		t.Errorf("S03usbdev budgets %d endpoints, Go budgets %d", shell, DefaultEndpointBudget)
+	}
+}
+
+// The budget is measured, and the kernel's own number disagrees with it. A
+// later change that "fixes" the constant by parsing dmesg would silently refuse
+// acm+network and acm+disk+audio, both of which bind on hardware.
+func TestTheShellBudgetIsNotReadFromDmesg(t *testing.T) {
+	script := readInitScript(t)
+
+	start := strings.Index(script, "usb_budget() {")
+	if start < 0 {
+		t.Fatal("S03usbdev has no usb_budget function")
+	}
+
+	end := strings.Index(script[start:], "\n}")
+
+	if strings.Contains(script[start:start+end], "dmesg") {
+		t.Error("usb_budget consults dmesg, which reports 8 while 9 endpoints bind")
 	}
 }
 ```
@@ -1759,27 +1876,35 @@ Expected, exactly:
 
 - `state: configured`
 - `/dev/hidg0 /dev/hidg1 /dev/hidg2` all present
-- `linked:` shows `acm.GS0 hid.GS0 hid.GS1 hid.GS2 mass_storage.disk0` — 8 endpoints
-- `/data/usb-endpoints.log` names `audio` and `network` as dropped
-- **`markers:` still lists all four**, including the two that were dropped
+- `linked:` shows `acm.GS0 hid.GS0 hid.GS1 hid.GS2 mass_storage.disk0 uac1.usb0` — 9 endpoints
+- `/data/usb-endpoints.log` names **`network`** as dropped, and nothing else
+- **`markers:` still lists all four**, including the one that was dropped
 - `no bind errors`
 
-The marker check is the one that is easy to skip and matters most: a guard that deletes what it
-drops has destroyed the operator's configuration.
+Two of these are easy to skip and matter most. The marker check: a guard that deletes what it
+drops has destroyed the operator's configuration. And the fact that only `network` is dropped:
+giving up the lowest-priority members instead would drop audio as well and settle on eight
+endpoints, losing a function for nothing.
 
-- [ ] **Step 5: Verify the toggle refuses**
+- [ ] **Step 5: Verify the toggle refuses, and the budget line tracks**
 
-In the web UI, `Settings > Device`: the budget line reads `8 of 8 used`, the speaker switch is
-disabled, and its tooltip explains why. Turn the virtual disk off, and confirm the speaker
-becomes available with the budget reading `6 of 8`.
+In the web UI, `Settings > Device`:
+
+1. The budget line reads `9 of 9 used`. The virtual network switch is disabled, and its tooltip
+   explains why. The speaker reads on.
+2. Turn the virtual disk off. The line reads `7 of 9`, and the network is **still** disabled — it
+   needs 3 and only 2 are free. This is the case a naive UI gets wrong by enabling anything as
+   soon as the bar is not full.
+3. Turn the speaker off. The line reads `6 of 9` and the network becomes available.
 
 - [ ] **Step 6: Restore the working configuration**
 
 ```shell
-ssh root@<device> 'rm -f /boot/usb.disk0 /boot/usb.rndis0; sync; reboot'
+ssh root@<device> 'touch /boot/usb.acm /boot/usb.disk0 /boot/usb.uac; rm -f /boot/usb.rndis0; sync; reboot'
 ```
 
-Expected after boot: `acm.GS0 hid.GS0 hid.GS1 hid.GS2 uac1.usb0`, 7 of 8, `/dev/hidg0..2` present.
+Expected after boot: `acm.GS0 hid.GS0 hid.GS1 hid.GS2 mass_storage.disk0 uac1.usb0`, 9 of 9,
+`/dev/hidg0..2` and `/dev/ttyGS0` present.
 
 - [ ] **Step 7: Record it**
 
@@ -1835,4 +1960,4 @@ puts it out of scope. Flagged at the top of this plan.
 compile against Task 1's struct. `canEnable` returns `(bool, int, []string)` in Tasks 1 and 4.
 `functionForDevice` is used in Tasks 1 and 4 with the same signature. The shell function names in
 Task 2 match exactly what Task 3's parser looks for: `usb_cost() {`, `usb_drop_order() {`,
-`usb_hid_cost() {`, and the literal `budget=8`.
+`usb_hid_cost() {`, and `usb_budget() {` echoing a bare integer.

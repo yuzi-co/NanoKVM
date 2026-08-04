@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"bytes"
 	"io"
 	"os/exec"
 	"sync"
@@ -26,7 +27,52 @@ const (
 	// budget. A child that emits a single chunk and exits is not a healthy
 	// restart; it is a crash loop.
 	minRunDuration = 5 * time.Second
+
+	// stderrLimit caps what is kept of the child's stderr. ALSA states its
+	// reason in one short line, so this is generous; the cap is there because
+	// a child that complains once per period must not grow a buffer forever.
+	stderrLimit = 512
 )
+
+// tailBuffer keeps the last stderrLimit bytes written to it and nothing else.
+//
+// arecord reports why it failed on stderr, and the reason is the whole
+// diagnosis: "Device or resource busy" means another reader holds the card,
+// "No such file or directory" means the gadget has no card, and
+// "Sample format non available" means the gadget offers something else. With
+// Stderr left unset the child writes to /dev/null and all of that is lost.
+type tailBuffer struct {
+	mutex sync.Mutex
+	data  []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	b.data = append(b.data, p...)
+	if len(b.data) > stderrLimit {
+		b.data = b.data[len(b.data)-stderrLimit:]
+	}
+
+	return len(p), nil
+}
+
+// lastLine returns the last line that has something in it. arecord prints its
+// usage banner and its error on separate lines, and the error comes last.
+func (b *tailBuffer) lastLine() string {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	lines := bytes.Split(b.data, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := bytes.TrimSpace(lines[i]); len(line) > 0 {
+			return string(line)
+		}
+	}
+
+	return ""
+}
 
 // Source owns the arecord child process and hands its output out in chunks.
 type Source struct {
@@ -100,10 +146,11 @@ func (s *Source) Run(handle func([]byte)) {
 			windowStart = time.Now()
 			restarts = 0
 		} else {
-			if !delivered || uptime <= minRunDuration {
-				log.Warnf("audio capture exited (uptime=%v, delivered=%v), restart %d/%d",
-					uptime, delivered, restarts+1, restartLimit)
-			}
+			// This branch is the negation of the condition above, so every
+			// arrival here is a child that failed or one that did not run
+			// long enough to count.
+			log.Warnf("audio capture exited (uptime=%v, delivered=%v), restart %d/%d",
+				uptime, delivered, restarts+1, restartLimit)
 
 			restarts++
 			if restarts >= restartLimit {
@@ -141,10 +188,34 @@ func (s *Source) runOnce(chunk []byte, handle func([]byte)) (bool, time.Duration
 		return false, time.Since(startTime)
 	}
 
+	// Keep the tail of stderr. A child that never delivers is the case that
+	// needs explaining, and its reason is on stderr rather than in the exit
+	// code.
+	//
+	// This takes a pipe and copies from it here, rather than handing os/exec a
+	// writer. A writer makes Wait block until every holder of the write end
+	// closes it, and that includes anything the child left behind, so a wedged
+	// grandchild would hold Wait open for as long as it lived. Wait closes the
+	// read end of a pipe as soon as it reaps the child, which ends the copy.
+	stderr := &tailBuffer{}
+	copied := make(chan struct{})
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		log.Errorf("failed to open the audio capture error pipe: %s", err)
+		return false, time.Since(startTime)
+	}
+
 	if err := cmd.Start(); err != nil {
 		log.Errorf("failed to start audio capture: %s", err)
 		return false, time.Since(startTime)
 	}
+
+	go func() {
+		defer close(copied)
+
+		_, _ = io.Copy(stderr, stderrPipe)
+	}()
 
 	// Store cmd and stdout together under one lock so Stop can close both
 	// atomically, avoiding the window where one is recorded and the other is not.
@@ -153,6 +224,7 @@ func (s *Source) runOnce(chunk []byte, handle func([]byte)) (bool, time.Duration
 		s.mutex.Unlock()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		<-copied
 		_ = stdout.Close()
 		return false, time.Since(startTime)
 	}
@@ -179,6 +251,18 @@ func (s *Source) runOnce(chunk []byte, handle func([]byte)) (bool, time.Duration
 	}
 
 	_ = cmd.Wait()
+
+	// Wait reaped the child and closed the read end, so the copy above has
+	// finished or is about to. Waiting for it is what makes the buffer safe to
+	// read here.
+	<-copied
+
+	// A healthy child never gets here, so this costs nothing while audio works.
+	if !delivered {
+		if line := stderr.lastLine(); line != "" {
+			log.Warnf("audio capture said: %s", line)
+		}
+	}
 
 	return delivered, time.Since(startTime)
 }

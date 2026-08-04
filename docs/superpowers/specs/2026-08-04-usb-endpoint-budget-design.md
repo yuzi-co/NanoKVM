@@ -81,13 +81,33 @@ Three of the four optional functions therefore fit, in two combinations: `acm + 
 - Priority ordering, applied only at boot.
 - Reporting of what is actually active, as distinct from what is enabled.
 - A UI that states the budget, the per-function cost, and the reason a switch is unavailable.
+- A switch for the serial console, which is the one function that has never had one.
+
+### The serial console becomes togglable
+
+Today `/boot/usb.acm` is created by hand over SSH. It gets a switch beside the other three, for
+one reason above all: it consumes three of the nine endpoints, which is a third of the budget and
+the largest single claim after HID. A budget display that shows `9 of 9 used` while offering no
+way to free the biggest consumer tells the operator their problem and withholds the answer.
+
+**This changes the security posture, and the UI must say so.** `/etc/inittab` respawns a getty on
+`ttyGS0`, so an enabled console gives whoever controls the managed host a root login prompt on the
+KVM. Creating the marker over SSH was a deliberate speed bump; a switch removes it. The row
+therefore carries a warning in the same style as the existing SSH toggle's tip, which already
+says "Set a strong password before enabling".
+
+**The unmount must remove only the symlink.** `rmdir` on `functions/acm.GS0` blocks indefinitely,
+because the respawning getty holds `/dev/ttyGS0` open, and recovering from that needs a full
+teardown of the gadget. This is the same rule the audio function already follows, and it is
+asserted by an existing test.
 
 **Out of scope**
 
 - The ION carveout crash and its leak. Separate spec, agreed 2026-08-04.
 - Changing which functions exist, their descriptors, or their endpoint costs.
 - A user-editable priority order. The order is a constant in the source.
-- Endpoint accounting for `/boot/disable_hid`. HID is never dropped, so it is a fixed 3.
+- A user-facing choice about HID itself. `/boot/disable_hid` is read, and HID costs 0 when it is
+  set, but nothing in this feature offers to turn HID off.
 
 ## Priority
 
@@ -112,9 +132,17 @@ They answer different questions, so they behave differently.
 that reboots with too many markers must still come up with HID.
 
 1. Read the markers and build the enabled set.
-2. Sum the costs. While the sum exceeds the budget, remove the lowest-priority member.
-3. Link the survivors into `configs/c.1` in priority order.
-4. Write one line per dropped function to the console and to `/data/usb-endpoints.log`.
+2. Offer each enabled function a place, in priority order, keeping the ones that still fit.
+3. Link the survivors into `configs/c.1` in that same order.
+4. Write one line per function that did not get a place, to the console and to
+   `/data/usb-endpoints.log`.
+
+Step 2 offers places rather than giving up the lowest-ranked members until the total comes down.
+The two rules agree on which function outranks which and disagree on the result: with everything
+enabled, giving up loses the speaker, then the network, and settles on `acm + disk` at eight of
+the nine endpoints — while `acm + disk + audio` is exactly nine and keeps one function more.
+Offering places never leaves room unused, and it cannot promote a lower-priority function over a
+higher one, because the higher one is offered first.
 
 **Dropping never deletes a marker.** The operator's intent stays on disk. When they later turn
 something else off, the dropped function returns on its own. A guard that rewrites configuration
@@ -149,7 +177,7 @@ that is not running. It gains a second fact per device:
 - `enabled` — the `/boot` marker exists (unchanged meaning)
 - `active` — a symlink for the function exists in `configs/c.1`
 
-`GetVirtualDeviceRsp` grows from three booleans to three objects, plus the budget:
+`GetVirtualDeviceRsp` grows from three booleans to four objects, plus the budget:
 
 ```go
 type VirtualDeviceState struct {
@@ -159,6 +187,7 @@ type VirtualDeviceState struct {
 }
 
 type GetVirtualDeviceRsp struct {
+    Console VirtualDeviceState `json:"console"`
     Network VirtualDeviceState `json:"network"`
     Disk    VirtualDeviceState `json:"disk"`
     Audio   VirtualDeviceState `json:"audio"`
@@ -186,16 +215,23 @@ invented here.
 `web/src/pages/desktop/menu/settings/device/virtual-devices.tsx`.
 
 ```
-USB endpoints                                    7 / 8 used
-████████████████████████████████████░░░░
+USB endpoints                                    9 / 9 used
+████████████████████████████████████████
 
-Virtual Disk            needs 2, 1 free           [ off ]  disabled
-  Mount a disk image on the managed host
-  Not enough USB endpoints. Turn off the serial
-  console (3) or the speaker (1) first.
+Serial Console          uses 3                    [ on  ]
+  Log in to this NanoKVM from the remote host when
+  the network is unreachable
+  ! Anyone who controls the remote host gets a login
+    prompt on this NanoKVM. Set a strong password first.
+
+Virtual Disk            uses 2                    [ on  ]
+  Mount SD card on the remote host
+
+Virtual Network         needs 3, 0 free           [ off ]  disabled
+  Not enough USB endpoints. Turn something else off first.
 
 Virtual Speaker         uses 1                    [ on  ]
-  Play audio from the managed host through USB
+  Play audio from the remote host through USB
 ```
 
 1. A budget line at the top, always visible. Nothing today tells an operator a limit exists until
@@ -206,6 +242,9 @@ Virtual Speaker         uses 1                    [ on  ]
 4. When `enabled && !active`, the switch reads on and carries a warning: the gadget ran out of
    endpoints, and the function starts on the next reboot once something else is turned off. This
    state must not look identical to a working one.
+5. The serial console row carries its security warning in both states, on and off. It describes
+   what the switch does rather than reporting a fault, and it follows the wording of the existing
+   SSH toggle's tip.
 
 Failure text comes from the server rather than being recomputed in the frontend, so the two cannot
 disagree about the numbers.

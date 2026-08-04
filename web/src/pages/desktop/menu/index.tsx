@@ -20,6 +20,7 @@ import { Power } from './power';
 import { Screen } from './screen';
 import { Script } from './script';
 import { Settings } from './settings';
+import { Speaker } from './speaker';
 import { Terminal } from './terminal';
 import { Wol } from './wol';
 
@@ -90,6 +91,7 @@ export const Menu = () => {
             <Screen />
             <Keyboard />
             <Mouse />
+            {isEnabled('speaker') && <Speaker />}
             <Divider type="vertical" />
 
             {isEnabled('image') && <Image />}

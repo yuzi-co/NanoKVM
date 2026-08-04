@@ -6,7 +6,7 @@ export function getVirtualDevice() {
 }
 
 // mount/unmount virtual device
-export function updateVirtualDevice(device: string) {
+export function updateVirtualDevice(device: 'disk' | 'network' | 'audio') {
   const data = {
     device
   };

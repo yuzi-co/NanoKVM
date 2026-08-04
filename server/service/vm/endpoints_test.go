@@ -158,15 +158,39 @@ func TestEndpointCostRejectsUnknownNames(t *testing.T) {
 	}
 }
 
-// The console is accounted for but has no toggle, so the API must not offer it
-// as a device somebody can switch on.
-func TestConsoleIsAccountedButNotTogglable(t *testing.T) {
+// The console claims three of the nine endpoints - the largest single share
+// after HID - so it needs a switch like the rest. A budget display that shows
+// the operator a full bar while offering no way to free the biggest consumer
+// states the problem and withholds the answer.
+func TestConsoleIsTogglableLikeTheOthers(t *testing.T) {
 	if _, ok := endpointCost("console"); !ok {
 		t.Error("the console is missing from the table")
 	}
 
-	if _, _, _, ok := commandsFor("console"); ok {
-		t.Error("commandsFor offers the console as a togglable device")
+	function, ok := functionForDevice("console")
+	if !ok {
+		t.Fatal("no function answers to the device name \"console\"")
+	}
+
+	if function.markers[0] != virtualConsole {
+		t.Errorf("the console is gated on %q, want %q", function.markers[0], virtualConsole)
+	}
+}
+
+// Every entry in the table that has a device name must be reachable through
+// the toggle, and every name the toggle accepts must be in the table. A name in
+// one and not the other is a switch that reports success and changes nothing,
+// or a function the budget cannot see.
+func TestEveryTogglableFunctionHasCommands(t *testing.T) {
+	for _, function := range usbFunctions {
+		if function.device == "" {
+			t.Errorf("%s has no device name, so nothing can switch it", function.name)
+			continue
+		}
+
+		if _, _, _, ok := commandsFor(function.device); !ok {
+			t.Errorf("commandsFor does not know %q", function.device)
+		}
 	}
 }
 

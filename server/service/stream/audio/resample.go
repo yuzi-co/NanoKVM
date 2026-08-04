@@ -46,7 +46,7 @@ func (d *Decimator) Process(pcm []byte, out []int16) []int16 {
 		right := int16(uint16(pcm[i+2]) | uint16(pcm[i+3])<<8)
 
 		d.history[d.next] = (float64(left) + float64(right)) / 2
-		d.next = (d.next + 1) % len(d.history)
+		d.next = (d.next + 1) % filterTaps
 
 		d.phase++
 		if d.phase < Decimation {
@@ -68,7 +68,7 @@ func (d *Decimator) filter() int16 {
 	index := d.next
 	for _, coeff := range d.coeffs {
 		sum += coeff * d.history[index]
-		index = (index + 1) % len(d.history)
+		index = (index + 1) % filterTaps
 	}
 
 	if sum > math.MaxInt16 {

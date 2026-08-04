@@ -39,13 +39,13 @@ In scope:
 
 - Listen only. The operator hears the host.
 - WebRTC only. The mjpeg and direct video paths get no audio.
-- Opt-in. A `/boot/usb.uac` marker gates the gadget function.
+- Opt-in, and switched from the web UI. A `/boot/usb.uac` marker gates the gadget function, and the
+  existing virtual-device toggle turns it on and off.
 
 Out of scope, and deliberately so:
 
 - Talking back to the host (browser microphone to `hw:UAC1Gadget,0` playback).
 - Audio on the mjpeg and direct paths.
-- A web UI switch that rebuilds the gadget at run time. Rebuilding the gadget tears down HID.
 
 ## Constraints that shaped the design
 
@@ -86,6 +86,11 @@ not lose its audio as well.
   **last**. configfs numbers interfaces in link order, so a function inserted ahead of the HID ones
   renumbers the keyboard and the mice under a host that is already bound to them. The file already
   carries this warning for the ACM function.
+- `server/service/vm/virtual-device.go` gains an `audio` case beside `network` and `disk`.
+  `server/proto` gains an `Audio` field in the response and accepts `audio` in the request. The
+  route does not change.
+- `web/src/api/virtual-device.ts` and
+  `web/src/pages/desktop/menu/settings/device/virtual-devices.tsx` gain a third row.
 - `web/src/pages/desktop/screen/h264-webrtc.tsx` sets `offerToReceiveAudio: true`, attaches the
   inbound track, and starts **muted**. Browsers block autoplay with sound until the user acts.
 - A speaker toggle in the desktop menu, with strings added to `web/src/i18n/locales/en.ts`.
@@ -111,15 +116,49 @@ host PC ──USB──▶ uac1.usb0 ──▶ hw:UAC1Gadget,0 ──▶ arecord
 The RTP clock rate for this track is 8000, and each packet carries 160 samples. Payload bandwidth is
 64 kbit/s before RTP overhead.
 
-## Availability, start and stop
+## Enabling, availability, start and stop
 
-The server reads `/proc/asound/cards` once at start and looks for `UAC1Gadget`. If the card is
-absent, audio is off for the life of the process and the server logs the reason once. `S03usbdev`
-runs long before `S95nanokvm`, so the card is present by then if it is going to be.
+The operator turns audio on from `Settings > Device`, beside the existing virtual network and
+virtual disk switches. `UpdateVirtualDevice` already does exactly this job for those two, and audio
+is a third case rather than a new mechanism:
+
+```
+touch /boot/usb.uac
+/etc/init.d/S03usbdev stop
+/etc/init.d/S03usbdev start
+```
+
+Turning it off removes the **symlink** and the marker, then restarts:
+
+```
+/etc/init.d/S03usbdev stop
+rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/uac1.usb0
+rm /boot/usb.uac
+/etc/init.d/S03usbdev start
+```
+
+Two properties of that existing code matter here, and neither is accidental. The handler holds the
+HID lock and calls `CloseNoLock` before the commands and `OpenNoLock` after, so the HID service is
+not holding `/dev/hidg*` open while the gadget is rebuilt. And the teardown removes the config
+symlink but never `rmdir`s the function directory. Removing a function directory blocks until every
+holder of its character device closes it, which is how a `rmdir` of `acm.GS0` hangs forever against
+the `ttyGS0` getty that `/etc/inittab` respawns.
+
+Because `S03usbdev start` relinks in script order and `uac1.usb0` is created last in the script, HID
+interface numbering survives the rebuild.
+
+Applying the switch drops USB to the host for about a second. The operator's keyboard and mouse come
+back by themselves; the host may need a moment to notice the new sound device, and reselecting the
+output device on the host is a manual step in any case.
+
+Audio availability is therefore **not** fixed for the life of the process, and the server must not
+cache it at start. It reads `/proc/asound/cards` and looks for `UAC1Gadget` when a client negotiates
+a connection. That is one small file read per WebRTC client, which is nothing.
 
 There is no new API route and no new configuration key. When audio is available, the PCMU track is
 in the offer, and the browser's `ontrack` event is the availability signal. When it is not, no track
-arrives and the UI shows no speaker. Nothing has to be negotiated or versioned.
+arrives and the UI shows no speaker. Nothing has to be negotiated or versioned. A browser that was
+already connected when the switch was thrown keeps its old set of tracks until it reconnects.
 
 Start and stop mirror the video path. The first client starts the stream under an `audioSending`
 guard, and the departure of the last client stops it.
@@ -133,8 +172,8 @@ the next tick, would hang here.
 
 | Condition | Behaviour |
 | --------- | --------- |
-| `UAC1Gadget` card absent | Audio off for the process. Logged once. No track offered. |
-| `arecord` binary absent | Same as above. |
+| `UAC1Gadget` card absent | No track offered to that client. Rechecked on the next connection, because the switch can add the card at any time. |
+| `arecord` binary absent | Audio off for the life of the process. Logged once. |
 | `arecord` exits during a stream | Restart with backoff, doubling from 200 ms to a 5 s cap. After five restarts inside one minute, mark audio failed for the life of the process and stop offering the track. |
 | Host plays nothing | The read blocks. This is the normal state. No packets, no CPU, silence in the browser. |
 | Client falls behind | The slot drops one 20 ms frame, which is one click. Counted the way dropped video frames are counted. |
@@ -157,6 +196,10 @@ backoff, and the give-up threshold without ALSA.
 The WebRTC additions follow the existing `track_test.go` and `client_test.go` patterns: packetize a
 known frame, confirm every client receives it, and confirm a client that does not drain its slot
 drops frames instead of blocking the sender.
+
+`UpdateVirtualDevice` gets a test for command selection only: the `audio` case must choose the
+mount list when the marker is absent and the unmount list when it is present. The commands
+themselves shell out to the device and are not run in a test.
 
 All of this runs off-device:
 
@@ -196,5 +239,10 @@ device, which is the reason the function is opt-in rather than on by default.
 
 Quality is telephone grade: 8 kHz, mono. It suits beeps, alarms, and speech. It does not suit music.
 
-Enabling or disabling the marker needs a reboot, because applying it means rebuilding the USB gadget
-and that drops HID to the host.
+Throwing the switch rebuilds the USB gadget, which drops HID to the host for about a second. The
+virtual network and virtual disk switches already carry that cost, so the behaviour is not new, but
+it is still a reason not to throw it while someone is typing into the host.
+
+The reverse risk is worse and is why the teardown removes only the symlink: a `rmdir` of a function
+directory whose character device is still open never returns, and recovering from that state needs a
+full teardown of the gadget followed by `S03usbdev start`.

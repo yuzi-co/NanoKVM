@@ -417,6 +417,9 @@ const en = {
         diskDesc: 'Mount SD card on the remote host',
         network: 'Virtual Network',
         networkDesc: 'Mount virtual network card on the remote host',
+        audio: 'Virtual Speaker',
+        audioDesc:
+          'Present a USB sound card to the remote host, so you can hear it. The host must select it as its output device. Switching this rebuilds the USB connection.',
         reboot: 'Reboot',
         rebootDesc: 'Are you sure you want to reboot NanoKVM?',
         okBtn: 'Yes',
@@ -731,6 +734,10 @@ const en = {
     },
     fullscreen: {
       toggle: 'Toggle Fullscreen'
+    },
+    speaker: {
+      unmute: 'Unmute',
+      mute: 'Mute'
     },
     menu: {
       collapse: 'Collapse Menu',

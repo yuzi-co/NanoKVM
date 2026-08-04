@@ -15,6 +15,7 @@ import (
 const (
 	virtualNetwork = "/boot/usb.rndis0"
 	virtualDisk    = "/boot/usb.disk0"
+	virtualAudio   = "/boot/usb.uac"
 )
 
 var (
@@ -43,17 +44,50 @@ var (
 		"rm /boot/usb.disk0",
 		"/etc/init.d/S03usbdev start",
 	}
+
+	mountAudioCommands = []string{
+		"touch /boot/usb.uac",
+		"/etc/init.d/S03usbdev stop",
+		"/etc/init.d/S03usbdev start",
+	}
+
+	// The function directory stays. Removing it blocks until every holder of
+	// its character device closes it, and recovering from that needs a full
+	// teardown of the gadget.
+	unmountAudioCommands = []string{
+		"/etc/init.d/S03usbdev stop",
+		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/uac1.usb0",
+		"rm /boot/usb.uac",
+		"/etc/init.d/S03usbdev start",
+	}
 )
+
+// commandsFor maps a device name onto its marker and the two command lists.
+// It exists so that the mapping can be tested without running anything.
+func commandsFor(device string) (marker string, mount []string, unmount []string, ok bool) {
+	switch device {
+	case "network":
+		return virtualNetwork, mountNetworkCommands, unmountNetworkCommands, true
+	case "disk":
+		return virtualDisk, mountDiskCommands, unmountDiskCommands, true
+	case "audio":
+		return virtualAudio, mountAudioCommands, unmountAudioCommands, true
+	default:
+		return "", nil, nil, false
+	}
+}
 
 func (s *Service) GetVirtualDevice(c *gin.Context) {
 	var rsp proto.Response
 
 	network, _ := isDeviceExist(virtualNetwork)
 	disk, _ := isDeviceExist(virtualDisk)
+	audio, _ := isDeviceExist(virtualAudio)
 
 	rsp.OkRspWithData(c, &proto.GetVirtualDeviceRsp{
 		Network: network,
 		Disk:    disk,
+		Audio:   audio,
 	})
 	log.Debugf("get virtual device success")
 }
@@ -67,31 +101,15 @@ func (s *Service) UpdateVirtualDevice(c *gin.Context) {
 		return
 	}
 
-	var device string
-	var commands []string
-
-	switch req.Device {
-	case "network":
-		device = virtualNetwork
-
-		exist, _ := isDeviceExist(device)
-		if !exist {
-			commands = mountNetworkCommands
-		} else {
-			commands = unmountNetworkCommands
-		}
-	case "disk":
-		device = virtualDisk
-
-		exist, _ := isDeviceExist(device)
-		if !exist {
-			commands = mountDiskCommands
-		} else {
-			commands = unmountDiskCommands
-		}
-	default:
+	device, mount, unmount, ok := commandsFor(req.Device)
+	if !ok {
 		rsp.ErrRsp(c, -2, "invalid arguments")
 		return
+	}
+
+	commands := mount
+	if exist, _ := isDeviceExist(device); exist {
+		commands = unmount
 	}
 
 	h := hid.GetHid()

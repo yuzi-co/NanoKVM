@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"NanoKVM-Server/service/stream/audio"
+
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
 )
@@ -121,5 +123,99 @@ func TestRemoveClientReturnsAfterAddClientStartsTheWriters(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("RemoveClient did not return within 2s: AddClient must start every writer that stop() waits on")
+	}
+}
+
+func TestStartAudioStreamDoesNothingWithoutClients(t *testing.T) {
+	manager := NewWebRTCManager()
+
+	manager.StartAudioStream()
+
+	manager.mutex.Lock()
+	sending := manager.audioSending
+	manager.mutex.Unlock()
+
+	if sending {
+		t.Error("the audio stream started with no clients connected")
+	}
+}
+
+// The audio loop blocks on a read while the host plays nothing, so it cannot
+// notice an empty client list by itself. Stopping has to come from outside.
+func TestStopAudioStreamIfIdleClearsTheFlag(t *testing.T) {
+	manager := NewWebRTCManager()
+
+	manager.mutex.Lock()
+	manager.audioSending = true
+	manager.mutex.Unlock()
+
+	manager.stopAudioStreamIfIdle()
+
+	manager.mutex.Lock()
+	sending := manager.audioSending
+	manager.mutex.Unlock()
+
+	if sending {
+		t.Error("stopAudioStreamIfIdle left the stream marked as sending")
+	}
+}
+
+// ICE reports Connected and then Completed, and signalling calls AddClient on
+// both. The second call must not start a second writer goroutine.
+func TestStoreClientReportsRepeatedAdds(t *testing.T) {
+	manager := NewWebRTCManager()
+	client := &Client{}
+
+	if _, _, isNew := manager.storeClient(nil, client); !isNew {
+		t.Error("the first add was not reported as new")
+	}
+
+	if _, _, isNew := manager.storeClient(nil, client); isNew {
+		t.Error("a repeated add was reported as new, so the writers would start twice")
+	}
+}
+
+// Capture is worth starting only for a client that negotiated an audio track.
+// A viewer that connected before the switch was thrown has none.
+func TestHasAudioListenerIgnoresClientsWithoutAnAudioTrack(t *testing.T) {
+	manager := NewWebRTCManager()
+
+	client := newTestClient()
+	manager.storeClient(nil, client)
+
+	if manager.hasAudioListener() {
+		t.Error("a client with a video-only track was counted as a listener")
+	}
+
+	client.mutex.Lock()
+	client.track.audio = &recordingWriter{}
+	client.mutex.Unlock()
+
+	if !manager.hasAudioListener() {
+		t.Error("a client with an audio track was not counted as a listener")
+	}
+}
+
+// When capture gives up, the frame channel closes and the send loop returns.
+// The manager has to notice, or it never starts a replacement stream.
+func TestSendAudioStreamClearsTheFlagWhenTheStreamEnds(t *testing.T) {
+	manager := NewWebRTCManager()
+
+	stream := audio.NewStream()
+
+	manager.mutex.Lock()
+	manager.audioStream = stream
+	manager.audioSending = true
+	manager.mutex.Unlock()
+
+	stream.Stop()
+	manager.sendAudioStream(stream)
+
+	manager.mutex.Lock()
+	sending := manager.audioSending
+	manager.mutex.Unlock()
+
+	if sending {
+		t.Error("the send loop returned but the manager still believes audio is sending")
 	}
 }

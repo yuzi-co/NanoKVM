@@ -58,10 +58,32 @@ stop_process() {
     wait_for_exit "$process" 2 || true
 }
 
+# The server starts arecord to read the USB audio gadget. The child does not
+# die with its parent: it sees the closed pipe only when it writes, and while
+# the managed host plays nothing it blocks in the ALSA read for as long as the
+# board is up.
+#
+# An orphan holds hw:UAC1Gadget,0 exclusively, so the next server's arecord
+# fails with "Device or resource busy", spends its restart budget in about
+# three seconds, and gives up. Audio then stays dead until somebody logs in.
+#
+# The server also stops the child on SIGTERM, which is the path this script
+# takes. This is here for the paths that reach no code in the server: a
+# SIGKILL, a crash, and an operator who killed it by hand.
+#
+# The redirect hides the "no process killed" line, which is the normal case.
+stop_audio_capture() {
+    killall arecord 2>/dev/null
+}
+
 stop_services() {
     # The server owns VI/VPSS. Let it release MMF before stopping kvm_system.
     stop_process NanoKVM-Server
     stop_process kvm_system
+
+    # After the server is gone, or it starts a new child.
+    stop_audio_capture
+
     rm -rf /tmp/kvm_system /tmp/server
 }
 

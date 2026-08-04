@@ -69,15 +69,30 @@ func (m *WebRTCManager) StartAudioStream() {
 	log.Debugf("start sending g711 stream")
 }
 
-// stopAudioStreamIfIdle stops capture once the last viewer has gone.
+// StopAudioCapture stops capture whatever the client count, and kills the
+// arecord child with it. main.go calls it from dispose() so the child does not
+// outlive the server.
 //
-// This has to kill the child process rather than wait for the loop to notice.
-// While the host plays nothing, arecord blocks in a read, so the loop does not
-// tick and would never see the empty client list.
-func (m *WebRTCManager) stopAudioStreamIfIdle() {
+// An orphaned arecord does not die on its own. It notices the closed pipe only
+// when it writes, and while the host plays nothing it blocks in the ALSA read
+// for as long as the board is up. The orphan holds hw:UAC1Gadget,0
+// exclusively, so the replacement server's arecord fails with "Device or
+// resource busy", spends its whole restart budget in about three seconds, and
+// gives up. Audio then stays dead until somebody logs in and kills the orphan.
+//
+// It is a package function rather than a method because dispose() has no
+// manager to hand it. getManager() returns the same singleton that signalling
+// uses.
+func StopAudioCapture() {
+	getManager().stopAudioStream()
+}
+
+// stopAudioStream ends capture and forgets the stream. The caller decides
+// whether stopping is the right thing to do.
+func (m *WebRTCManager) stopAudioStream() {
 	m.mutex.Lock()
 
-	if len(m.clients) > 0 || !m.audioSending {
+	if !m.audioSending {
 		m.mutex.Unlock()
 		return
 	}
@@ -87,11 +102,35 @@ func (m *WebRTCManager) stopAudioStreamIfIdle() {
 	m.audioSending = false
 	m.mutex.Unlock()
 
+	// Stop runs outside the lock. It waits on the capture goroutine, and no
+	// other caller may be held up behind that.
 	if stream != nil {
 		stream.Stop()
 	}
 
 	log.Debugf("stop sending g711 stream")
+}
+
+// stopAudioStreamIfIdle stops capture once the last listener has gone.
+//
+// The condition mirrors StartAudioStream, which starts only when a client can
+// hear the result. Stopping on an empty client map instead would keep arecord,
+// the FIR and the packetizer running for a viewer that negotiated no audio
+// track, which is what a viewer that connected before the switch was thrown
+// has for its whole life.
+//
+// This has to kill the child process rather than wait for the loop to notice.
+// While the host plays nothing, arecord blocks in a read, so the loop does not
+// tick and would never see that nobody is listening.
+//
+// hasAudioListener reads the atomic client snapshot and takes no lock, so
+// calling it before m.mutex cannot invert the lock order.
+func (m *WebRTCManager) stopAudioStreamIfIdle() {
+	if m.hasAudioListener() {
+		return
+	}
+
+	m.stopAudioStream()
 }
 
 // sendAudioStream packetizes each frame once and hands the packets to every
@@ -101,10 +140,16 @@ func (m *WebRTCManager) sendAudioStream(stream *audio.Stream) {
 		m.deliverAudioFrame(frame)
 	}
 
-	// The channel closed. Either the last viewer left and stopAudioStreamIfIdle
-	// stopped this stream, or capture failed too often and the source gave up.
-	// The second case leaves the flag set unless it is cleared here, and then
-	// audio never recovers for the life of the process.
+	// The channel closed. Either the last listener left and
+	// stopAudioStreamIfIdle stopped this stream, or capture failed too often
+	// and the source gave up. The second case leaves the flag set unless it is
+	// cleared here, and no later StartAudioStream could ever run.
+	//
+	// Clearing the flag does not bring audio back for the viewer that lost it.
+	// StartAudioStream has one caller, an ICE state change, so a viewer whose
+	// capture gave up stays silent until it reconnects. What this buys is that
+	// the next connection starts a fresh stream instead of finding the manager
+	// still convinced audio is being sent.
 	m.clearAudioStream(stream)
 }
 
@@ -117,10 +162,28 @@ func (m *WebRTCManager) sendAudioStream(stream *audio.Stream) {
 // dropped: enqueueAudio would still take the slot lock and wake that client's
 // writer for a frame it can only discard, fifty times a second, for as long
 // as anyone else is listening.
+//
+// The listener check comes before Packetize for the same reason. Packetize
+// allocates a header and a payload slice per packet, and a frame nobody can
+// hear is fifty of those a second thrown away on a board with one core.
 func (m *WebRTCManager) deliverAudioFrame(frame []byte) {
+	clients := m.getClients()
+
+	var listening bool
+	for _, client := range clients {
+		if client.hasAudioTrack() {
+			listening = true
+			break
+		}
+	}
+
+	if !listening {
+		return
+	}
+
 	packets := m.audioPacketizer.Packetize(frame, audio.FrameSamples)
 
-	for _, client := range m.getClients() {
+	for _, client := range clients {
 		if !client.hasAudioTrack() {
 			continue
 		}

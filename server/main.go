@@ -12,6 +12,7 @@ import (
 	"NanoKVM-Server/logger"
 	"NanoKVM-Server/middleware"
 	"NanoKVM-Server/router"
+	"NanoKVM-Server/service/stream/webrtc"
 	"NanoKVM-Server/service/vm"
 	"NanoKVM-Server/service/vm/jiggler"
 	"NanoKVM-Server/utils"
@@ -138,5 +139,16 @@ func run() {
 }
 
 func dispose() {
+	// Stop the audio child before this process goes away. It does not follow us
+	// out: arecord sees the closed pipe only when it writes, and while the host
+	// plays nothing it blocks in the ALSA read forever. The orphan keeps the
+	// capture card open, so the next server cannot record and audio stays dead
+	// until somebody kills it by hand.
+	//
+	// This covers SIGTERM, which is what `S95nanokvm restart` and the in-place
+	// updater send. S95nanokvm kills arecord as well, because a SIGKILL or a
+	// crash reaches no code in this process.
+	webrtc.StopAudioCapture()
+
 	common.GetKvmVision().Close()
 }

@@ -15,9 +15,11 @@ trap 'rm -rf "$WORK"' EXIT
 sed -n '/^# --- decide ---$/,/^# --- end decide ---$/p'   "$SV" > "$WORK/decide.sh"
 sed -n '/^# --- backoff ---$/,/^# --- end backoff ---$/p' "$SV" > "$WORK/backoff.sh"
 sed -n '/^# --- cure ---$/,/^# --- end cure ---$/p'       "$SV" > "$WORK/cure.sh"
-[ -s "$WORK/decide.sh" ]  || { echo "could not extract the decide block"; exit 1; }
-[ -s "$WORK/backoff.sh" ] || { echo "could not extract the backoff block"; exit 1; }
-[ -s "$WORK/cure.sh" ]    || { echo "could not extract the cure block"; exit 1; }
+sed -n '/^# --- escalate ---$/,/^# --- end escalate ---$/p' "$SV" > "$WORK/escalate.sh"
+[ -s "$WORK/decide.sh" ]   || { echo "could not extract the decide block"; exit 1; }
+[ -s "$WORK/backoff.sh" ]  || { echo "could not extract the backoff block"; exit 1; }
+[ -s "$WORK/cure.sh" ]     || { echo "could not extract the cure block"; exit 1; }
+[ -s "$WORK/escalate.sh" ] || { echo "could not extract the escalate block"; exit 1; }
 
 fails=0
 note() { printf '  %-60s %s\n' "$1" "$2"; [ "$2" = FAIL ] && fails=$((fails + 1)); return 0; }
@@ -107,6 +109,196 @@ reset_case() {
 reset_case "ran 5 minutes then died, so start over"   300 60 5
 reset_case "died again after 3 seconds, so keep backing off" 3 20 40
 reset_case "died right at the threshold"              60 40 5
+
+echo
+echo "===== a server that never runs is a board that needs rebooting ====="
+# The failure this exists for: an exhausted ION carveout makes libkvm dereference
+# a NULL and the server is gone in under a second. Nothing in userspace frees the
+# carveout, so restarting is guaranteed not to work - and the supervisor did it
+# 23 times over 22 minutes, and would not have stopped.
+count_case() {
+    desc="$1"; ran="$2"; count="$3"; want="$4"
+    got=$(WORK="$WORK" sh -c ". \"\$WORK/escalate.sh\"; count_fast_death $ran $count")
+    [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
+}
+
+#          desc                                          ran count want
+count_case "died in under a second, so it never ran"      0  0  1
+count_case "another one straight after"                   1  3  4
+count_case "died at 4s, still too fast to count"          4  1  2
+# The boundary matters: 5s is the line, and a run that reaches it is a run. Being
+# wrong on this side means rebooting a board that was recovering on its own.
+count_case "reached the threshold, so the run counts"     5  4  0
+count_case "ran a full minute, so the streak is broken"  60  4  0
+
+echo
+verdict_case() {
+    desc="$1"; count="$2"; armed="$3"; want="$4"
+    got=$(WORK="$WORK" sh -c ". \"\$WORK/escalate.sh\"; reboot_verdict $count $armed")
+    [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
+}
+
+#            desc                                        count armed want
+verdict_case "one quick death proves nothing"              1  yes keep-trying
+verdict_case "four is still inside the budget"             4  yes keep-trying
+verdict_case "five in a row: nothing here can cure it"     5  yes reboot
+verdict_case "still counting up, still worth a reboot"     9  yes reboot
+
+# One reboot per fault. If a power cycle did not fix it, a second will not, and a
+# board rebooting on a loop is worse than one that only fails to serve: it is
+# unreachable during every boot and it writes to the SD card on every pass.
+verdict_case "already rebooted for this, so keep looping"  5  no  already-rebooted
+verdict_case "already rebooted, and it is still dying"    99  no  already-rebooted
+
+echo
+echo "===== the escalation is wired into the loop ====="
+# Both of these were defined and unreachable at one point in review. Every case
+# above stays green when they are, because they test the block in isolation.
+grep -qE '^[[:space:]]+escalate_reboot "\$fast_deaths"$' "$SV" \
+    && note "the reboot verdict actually calls escalate_reboot" OK \
+    || note "escalate_reboot is defined but never reached" FAIL
+grep -qE '^[[:space:]]+confirm_recovery "\$healthy_since"$' "$SV" \
+    && note "a healthy server re-arms the escalation" OK \
+    || note "confirm_recovery is never called, so it reboots at most once ever" FAIL
+grep -qE 'fast_deaths=\$\(count_fast_death ' "$SV" \
+    && note "the streak is counted from the run that just ended" OK \
+    || note "count_fast_death is never called" FAIL
+
+# The record has to outlive the reboot it explains, so it cannot be in tmpfs.
+stamp=$(sed -n 's/^REBOOT_STAMP=.*:-\([^}]*\)}.*$/\1/p' "$SV")
+case "$stamp" in
+    /data/*) note "the reboot stamp lives at $stamp, which survives a reboot" OK ;;
+    "")      note "the reboot stamp has no default path" FAIL ;;
+    *)       note "the reboot stamp is at $stamp, which may be tmpfs" FAIL ;;
+esac
+
+# Writing the stamp after calling reboot would lose the race on a fast shutdown,
+# and the board would then be free to reboot itself again for the same fault.
+#
+# Match the two statements exactly rather than the word "reboot". An earlier
+# version of this check grepped for the word and failed against correct code: the
+# log line above the stamp says "rebooting the board", so the prose matched first
+# and the order looked inverted.
+body=$(sed -n '/^escalate_reboot()/,/^}/p' "$SV")
+stamp_at=$(echo "$body" | grep -n '^[[:space:]]*: > "\$REBOOT_STAMP"$' | cut -d: -f1)
+reboot_at=$(echo "$body" | grep -n '^[[:space:]]*reboot$' | cut -d: -f1)
+if [ -z "$stamp_at" ]; then
+    note "escalate_reboot never writes the stamp" FAIL
+elif [ -z "$reboot_at" ]; then
+    note "escalate_reboot never calls reboot" FAIL
+elif [ "$stamp_at" -lt "$reboot_at" ]; then
+    note "the stamp is written before the board is told to reboot" OK
+else
+    note "reboot is called before the stamp is written" FAIL
+fi
+
+echo
+echo "===== the loop really does escalate, not just contain the code ====="
+# The checks above asserted strings. Strings passed once while cure_hung was
+# defined and unreachable, so assert the behaviour: drive the actual watch_loop
+# with a server that always dies instantly and see the board get rebooted.
+#
+# Everything above the trailing case block is loadable, so take the whole script
+# and replace only what touches the machine.
+sed '/^case "\$1" in$/,$d' "$SV" > "$WORK/lib.sh"
+[ -s "$WORK/lib.sh" ] || { echo "could not load the script body"; exit 1; }
+
+escalation_out=$(WORK="$WORK" sh -c '
+    . "$WORK/lib.sh"
+
+    # A server that dies the instant it starts, and a clock that never moves, so
+    # every run measures zero seconds - the signature this exists to catch.
+    INTERVAL=0
+    SERVER_BIN=true
+    SERVER_LOG=/dev/null
+    REBOOT_STAMP="$WORK/stamp"
+    sleep()          { :; }
+    now()            { echo 1000; }
+    log()            { echo "LOG $*"; }
+    serving()        { return 1; }
+    process_running() { return 1; }
+    binary_present() { return 0; }
+    system_running() { return 0; }
+    action()         { echo restart; }
+    reboot()         { echo REBOOTED; exit 7; }
+
+    watch_loop
+' 2>&1)
+escalation_rc=$?
+
+restarts=$(echo "$escalation_out" | grep -c "is gone after")
+if [ "$escalation_rc" -ne 7 ]; then
+    note "the loop never reached reboot (rc=$escalation_rc)" FAIL
+elif [ "$restarts" -eq 5 ]; then
+    note "five instant deaths and the board reboots, not a sixth restart" OK
+else
+    note "rebooted after $restarts restarts, want 5" FAIL
+fi
+
+echo "$escalation_out" | grep -q "no restart can cure that" \
+    && note "the log says why the board rebooted itself" OK \
+    || note "the reboot is not explained in the log" FAIL
+[ -f "$WORK/stamp" ] \
+    && note "the stamp survives to stop a second reboot" OK \
+    || note "no stamp written, so the board could reboot again" FAIL
+
+# The same loop must NOT reboot when the server actually runs for a while. This
+# is the case that costs a working KVM if the threshold is wrong, so it has to
+# fail loudly rather than quietly do nothing: the loop runs in the foreground and
+# leaves only through one of two exits, and the test says which one it took.
+lasting_out=$(WORK="$WORK" sh -c '
+    . "$WORK/lib.sh"
+
+    INTERVAL=0
+    SERVER_BIN=true
+    SERVER_LOG=/dev/null
+    REBOOT_STAMP="$WORK/stamp2"
+    sleep()          { :; }
+    # The clock advances a full minute per reading, so every run is a real run
+    # and no streak can ever build.
+    #
+    # Keep the count in a file. watch_loop reads the clock as $(now), which runs
+    # in a subshell, so a shell variable here is incremented in a child and lost:
+    # every reading came back as the first one, every run measured zero seconds,
+    # and the test reported a reboot against correct code.
+    echo 0 > "$WORK/ticks"
+    now() {
+        t=$(( $(cat "$WORK/ticks") + 60 ))
+        echo "$t" > "$WORK/ticks"
+        echo "$t"
+    }
+    serving()        { return 1; }
+    process_running() { return 1; }
+    binary_present() { return 0; }
+    system_running() { return 0; }
+    action()         { echo restart; }
+    reboot()         { echo REBOOTED; exit 7; }
+
+    # Exit 9 once the loop has restarted the server 20 times without rebooting.
+    # Counting in log() is what bounds the run, so a loop that never gets that
+    # far cannot reach exit 9 and the test fails instead of passing vacuously.
+    seen=0
+    log() {
+        echo "LOG $*"
+        case "$*" in
+            *"is gone after"*)
+                seen=$((seen + 1))
+                [ "$seen" -ge 20 ] && { echo "SURVIVED $seen restarts"; exit 9; }
+                ;;
+        esac
+    }
+
+    watch_loop
+' 2>&1)
+lasting_rc=$?
+
+if echo "$lasting_out" | grep -q REBOOTED; then
+    note "a server that runs for a minute still triggered a reboot" FAIL
+elif [ "$lasting_rc" -eq 9 ]; then
+    note "20 lasting runs restart the server and never reboot the board" OK
+else
+    note "the loop left an unexpected way (rc=$lasting_rc), so this proved nothing" FAIL
+fi
 
 echo
 echo "===== a restarted server still reports where libkvm fails ====="

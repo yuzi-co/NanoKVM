@@ -22,6 +22,9 @@
 # Environment:
 #   SUPERVISE_INTERVAL   seconds between checks   (default 5)
 #   SUPERVISE_LOG        where events go          (default /data/supervise.log)
+#   SUPERVISE_FAST_DEATH        seconds under which a run counts as no run at all
+#   SUPERVISE_FAST_DEATH_LIMIT  consecutive fast deaths before the board reboots
+#   SUPERVISE_RECOVERY_CONFIRM  seconds of health that re-arm the escalation
 
 INTERVAL=${SUPERVISE_INTERVAL:-5}
 # Seconds a process may be alive and not answering before it counts as hung. A
@@ -35,6 +38,19 @@ PIDFILE=/tmp/supervise.pid
 
 SERVER_BIN=${SERVER_BIN:-/tmp/server/NanoKVM-Server}
 SYSTEM_BIN=${SYSTEM_BIN:-/tmp/kvm_system/kvm_system}
+
+# Seconds a run must reach to count as a run. A server that dies faster than this
+# never bound port 80, so restarting it changes nothing about why it died.
+FAST_DEATH=${SUPERVISE_FAST_DEATH:-5}
+# Consecutive fast deaths that mean the fault is outside this script's reach.
+FAST_DEATH_LIMIT=${SUPERVISE_FAST_DEATH_LIMIT:-5}
+# Seconds of health that prove the reboot worked, after which the board may
+# reboot itself again for a later, separate fault.
+RECOVERY_CONFIRM=${SUPERVISE_RECOVERY_CONFIRM:-300}
+# Records that this board has already rebooted itself for the current fault. In
+# /data because the question it answers - "did I already try that?" - only has
+# meaning across the reboot.
+REBOOT_STAMP=${SUPERVISE_REBOOT_STAMP:-/data/supervise-rebooted}
 
 # Where the server's own output goes. This must be the path S95nanokvm uses,
 # because S99vidiag reads that one file. libkvm reports a capture pipeline that
@@ -65,10 +81,14 @@ log() {
 # from outside looks healthiest of all. It gets its own verdict because the cure
 # differs - a crash needs starting, a hang needs killing first.
 #
-# The response is to restart the server, not to reboot the board. A reboot costs
-# 17 seconds, puts the boot path at risk, and can land on a slot carrying none of
-# these protections. The hardware watchdog is the right tool only for a kernel
-# lockup, where no userspace process can act at all.
+# The response to a hang is to restart the server, not to reboot the board. A
+# reboot costs 17 seconds, puts the boot path at risk, and can land on a slot
+# carrying none of these protections, and killing the process cures a hang
+# completely. The hardware watchdog is the right tool only for a kernel lockup,
+# where no userspace process can act at all.
+#
+# One failure does get the board rebooted, and it is not this one: a server that
+# dies faster than it can serve, again and again. See the escalate block.
 #
 # The threshold is deliberately generous and the default is inaction. A probe that
 # cannot run, a slow start under heavy IO, a moment of SD contention - none of
@@ -145,6 +165,61 @@ delay_after_run() {
 }
 # --- end backoff ---
 
+# --- escalate ---
+# Backing off forever is the right answer to a server that might yet start, and
+# the wrong answer to one that cannot. Both look the same from here, so tell them
+# apart by how long the server lasts.
+#
+# A run shorter than FAST_DEATH never reached the point of binding port 80. The
+# case this exists for is an exhausted ION carveout: libkvm does not check the
+# result of its allocation, so it dereferences the NULL and the process is gone
+# in under a second. The carveout is not released when the process exits either -
+# it stays charged to the soph_* modules, which cannot be unloaded while the
+# allocations are held. Measured on a device: stopping the server, then also
+# kvm_system, then starting the server alone still failed the same way. No
+# sequence of restarts can free it, and one reboot does.
+#
+# So a run of fast deaths is not a server to keep restarting. It is a board that
+# needs restarting, and this script is the only thing awake to say so. Without
+# this the supervisor restarted a doomed server 23 times over 22 minutes and
+# would have continued indefinitely.
+#
+# This does not soften the rule for a hang. A hung server still gets killed and
+# restarted, because that cure works and costs nothing. Only the failure that has
+# no userspace cure gets the expensive answer.
+count_fast_death() {
+    ran=$1
+    count=$2
+
+    if [ "$ran" -lt "${FAST_DEATH:-5}" ]; then
+        echo $((count + 1))
+    else
+        echo 0
+    fi
+}
+
+# reboot_verdict weighs a run of fast deaths against whether this board has
+# already rebooted itself for them.
+#
+# One reboot per fault, and no more. A second reboot has nothing left to cure: if
+# the first did not fix it, the fault survives a power cycle, and a board that
+# reboots on a loop is worse than one that merely does not serve - it writes to
+# the SD card on every pass and it is unreachable during each boot. Looping is
+# the safer failure, so that is what it falls back to.
+reboot_verdict() {
+    count=$1
+    armed=$2
+
+    if [ "$count" -lt "${FAST_DEATH_LIMIT:-5}" ]; then
+        echo keep-trying
+    elif [ "$armed" = yes ]; then
+        echo reboot
+    else
+        echo already-rebooted
+    fi
+}
+# --- end escalate ---
+
 binary_present() {
     [ -x "$SERVER_BIN" ]
 }
@@ -197,6 +272,34 @@ full_restart() {
         < /dev/null > /dev/null 2>&1 &
 }
 
+escalation_armed() {
+    [ ! -f "$REBOOT_STAMP" ]
+}
+
+# escalate_reboot writes the record before it acts, because the record is the
+# only thing that survives to explain the reboot. /data is not tmpfs.
+escalate_reboot() {
+    log "NanoKVM-Server died $1 times in a row in under ${FAST_DEATH}s each; no restart can cure that, rebooting the board"
+    : > "$REBOOT_STAMP"
+    sync
+    reboot
+
+    # reboot returns as soon as init is signalled. Stop deciding things in the
+    # seconds that follow - a shutdown in progress looks exactly like a fault.
+    sleep 60
+}
+
+# confirm_recovery re-arms the escalation once the board has served for long
+# enough to call the reboot a success. Until then the stamp stands and a second
+# reboot cannot happen.
+confirm_recovery() {
+    [ -f "$REBOOT_STAMP" ] || return 0
+    [ $(( $(now) - $1 )) -ge "${RECOVERY_CONFIRM:-300}" ] || return 0
+
+    rm -f "$REBOOT_STAMP"
+    log "server has answered for ${RECOVERY_CONFIRM}s since the reboot, re-arming the escalation"
+}
+
 # How long the server has been alive without answering. LAST_OK is maintained by
 # the watch loop.
 unhealthy_for() {
@@ -208,6 +311,12 @@ watch_loop() {
     started=$(now)
     LAST_OK=$(now)
 
+    # Consecutive deaths too quick to count as a run, and the moment the last
+    # non-healthy verdict was seen. Together they decide whether this board is
+    # having a problem the supervisor can cure.
+    fast_deaths=0
+    healthy_since=$(now)
+
     while :; do
         sleep "$INTERVAL"
 
@@ -215,7 +324,9 @@ watch_loop() {
 
         case "$(action)" in
             healthy)
+                fast_deaths=0
                 started=$(now)
+                confirm_recovery "$healthy_since"
                 ;;
 
             hung)
@@ -227,6 +338,7 @@ watch_loop() {
                 sleep 30
                 LAST_OK=$(now)
                 started=$(now)
+                healthy_since=$(now)
                 ;;
             stopped)
                 : # someone asked for this
@@ -234,6 +346,25 @@ watch_loop() {
             restart)
                 ran=$(( $(now) - started ))
                 log "NanoKVM-Server is gone after ${ran}s, restarting in ${delay}s"
+                healthy_since=$(now)
+
+                fast_deaths=$(count_fast_death "$ran" "$fast_deaths")
+                armed=no
+                escalation_armed && armed=yes
+
+                case "$(reboot_verdict "$fast_deaths" "$armed")" in
+                    reboot)
+                        escalate_reboot "$fast_deaths"
+                        ;;
+                    already-rebooted)
+                        # Once per episode. Saying it on every pass would bury
+                        # the line that matters under one a minute.
+                        if [ "$fast_deaths" -eq "$FAST_DEATH_LIMIT" ]; then
+                            log "still dying immediately, and this board has already rebooted itself for it - restarting instead"
+                        fi
+                        ;;
+                esac
+
                 sleep "$delay"
 
                 # Check again: a restart in progress may have started it while

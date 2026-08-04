@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -20,6 +21,25 @@ const cardName = "UAC1Gadget"
 
 // cardsPath is a variable so tests can point it at a fixture.
 var cardsPath = "/proc/asound/cards"
+
+// stopTimeout bounds how long Stop waits for the capture goroutine.
+//
+// The wait is bounded in theory already, because SIGKILL always reaps a
+// process. It is not bounded for a child wedged in an uninterruptible read.
+// This board has a documented case of that exact shape: a read of
+// /proc/cvitek/vb blocks forever in D state and survives every signal.
+// Tearing the USB gadget down underneath a blocked snd_pcm_readi is the same
+// class of event, and the settings switch can do it while a viewer listens.
+//
+// A goroutine left behind on a wedged child costs one stack, and it finishes
+// by itself when the child finally dies. A Stop that never returns wedges the
+// websocket handler that called it, so the bounded wait is the better trade.
+const stopTimeout = 2 * time.Second
+
+// warnCardsOnce keeps a failing read of the card list to one log line.
+// Available runs once per WebRTC connection, so an unguarded log repeats with
+// every viewer.
+var warnCardsOnce sync.Once
 
 // hasArecord is a function variable so tests can override it. In production,
 // it checks once per process via sync.Once. Tests may assign a different
@@ -55,6 +75,13 @@ func Available() bool {
 
 	cards, err := os.ReadFile(cardsPath)
 	if err != nil {
+		// A silent false here hides the whole feature. The file is always
+		// present on this kernel, so a read that fails is a fault worth one
+		// line in the log.
+		warnCardsOnce.Do(func() {
+			log.Warnf("audio is off: cannot read %s: %s", cardsPath, err)
+		})
+
 		return false
 	}
 
@@ -136,6 +163,12 @@ func (s *Stream) closeFrames() {
 // The wait on done is what makes closing frames safe: it means the source
 // goroutine, and therefore consume, has finished. A stream that was never
 // started has no such goroutine to wait for.
+//
+// The wait is bounded by stopTimeout. On a timeout Stop returns without
+// closing the channel, because consume may still be running and a send on a
+// closed channel panics. Nothing is lost by that: the goroutine started by
+// Start closes the channel itself once Run returns, so a consumer of a
+// timed-out stream unblocks when the wedged child finally dies.
 func (s *Stream) Stop() {
 	s.source.Stop()
 
@@ -144,7 +177,12 @@ func (s *Stream) Stop() {
 	s.mutex.Unlock()
 
 	if started {
-		<-s.done
+		select {
+		case <-s.done:
+		case <-time.After(stopTimeout):
+			log.Warnf("audio capture did not stop in %v; leaving it behind", stopTimeout)
+			return
+		}
 	}
 
 	s.closeFrames()
@@ -156,6 +194,16 @@ func (s *Stream) Frames() <-chan []byte {
 
 // consume converts one capture chunk and offers the frame. It never blocks: a
 // consumer that is behind loses 20 ms rather than stalling capture.
+//
+// A drop here is not the same as the per-client drop in Client.enqueueAudio,
+// and it is the worse of the two. The client drop happens after packetization,
+// so the receiver sees a sequence gap and a timestamp jump and treats it as
+// loss, which its jitter buffer is built for. A drop here never reaches the
+// packetizer, so the RTP timestamp does not advance across the gap: the
+// receiver hears a stream with the silence cut out of it, time-compressed and
+// drifting further from the host with every drop, and nothing in the protocol
+// reports that it happened. This channel therefore has to keep up, and the
+// only consumer is the send loop, which does not block.
 func (s *Stream) consume(chunk []byte) {
 	s.samples = s.decimator.Process(chunk, s.samples[:0])
 	s.frame = EncodeULaw(s.samples, s.frame[:0])

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Spin } from 'antd';
 import clsx from 'clsx';
-import { useAtom, useAtomValue } from 'jotai';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { w3cwebsocket as W3cWebSocket } from 'websocket';
 
 import * as storage from '@/lib/localstorage.ts';
 import { getBaseUrl } from '@/lib/service.ts';
-import { audioMutedAtom } from '@/jotai/audio.ts';
+import { audioMutedAtom, hasAudioAtom } from '@/jotai/audio.ts';
 import { mouseStyleAtom } from '@/jotai/mouse.ts';
 import { resolutionAtom, videoScaleAtom } from '@/jotai/screen.ts';
 
@@ -29,6 +29,7 @@ export const H264Webrtc = () => {
   const [videoScale, setVideoScale] = useAtom(videoScaleAtom);
   const [isLoading, setIsLoading] = useState(true);
   const isMuted = useAtomValue(audioMutedAtom);
+  const setHasAudio = useSetAtom(hasAudioAtom);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -95,8 +96,11 @@ export const H264Webrtc = () => {
           videoElement.srcObject = new MediaStream([event.track]);
         }
 
+        // An audio track arrives only when the device has the USB audio
+        // gadget, so this event is what tells the UI to offer a speaker.
         if (audioElement && event.track.kind === 'audio') {
           audioElement.srcObject = new MediaStream([event.track]);
+          setHasAudio(true);
         }
       };
 
@@ -219,6 +223,9 @@ export const H264Webrtc = () => {
       if (audioElement) {
         audioElement.srcObject = null;
       }
+      // The track goes with the peer connection, so the speaker button goes
+      // with it. A reconnect sets this again if a track still arrives.
+      setHasAudio(false);
       videoOfferSent.current = false;
       videoIceCandidates.current = [];
 
@@ -227,7 +234,7 @@ export const H264Webrtc = () => {
       }
       clearTimeout(loadingTimer);
     };
-  }, []);
+  }, [setHasAudio]);
 
   useEffect(() => {
     const scale = storage.getVideoScale();

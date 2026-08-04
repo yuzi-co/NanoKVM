@@ -16,7 +16,7 @@ export const Speaker = () => {
       mouseEnterDelay={0.6}
     >
       <div
-        className="flex h-[30px] w-[30px] cursor-pointer items-center justify-center rounded text-neutral-300 hover:bg-neutral-700/80 hover:text-white"
+        className="hidden h-[30px] w-[30px] cursor-pointer items-center justify-center rounded text-neutral-300 hover:bg-neutral-700/80 hover:text-white sm:flex"
         onClick={() => setIsMuted(!isMuted)}
       >
         {isMuted ? <VolumeXIcon size={18} /> : <Volume2Icon size={18} />}

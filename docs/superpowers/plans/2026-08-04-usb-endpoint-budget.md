@@ -78,7 +78,7 @@ Task 1 and Task 2 both implement this. Raise it if you disagree — everything e
 **Interfaces:**
 - Consumes: `virtualNetwork`, `virtualDisk`, `virtualAudio` from `server/service/vm/virtual-device.go:16-19`.
 - Produces:
-  - `const DefaultEndpointBudget = 8`
+  - `const DefaultEndpointBudget = 9`
   - `func endpointBudget() int`
   - `func hidEndpointCost(present func(string) bool) int`
   - `func usedEndpoints(present func(string) bool) int`
@@ -215,6 +215,33 @@ func TestCanEnableOnlySuggestsFunctionsThatFreeEnough(t *testing.T) {
 		if cost < needed {
 			t.Errorf("suggested %q, which frees %d of the %d needed", name, cost, needed)
 		}
+	}
+}
+
+// The case above cannot catch the filter being deleted: with the console and
+// the disk enabled, one endpoint is free, the network needs two more, and both
+// candidates clear that bar - so removing the filter returns the same list.
+//
+// This one discriminates. console(3) + disk(2) + audio(1) + hid(3) is exactly 9
+// and the network needs all three of its endpoints back, so only the console
+// can supply them on its own. A build with no filter would answer
+// [audio disk console] and send the operator to turn off a speaker that frees
+// one of the three endpoints it needs.
+//
+// This filter has already been deleted once during this task. It stays tested.
+func TestCanEnableWillNotSuggestAFunctionThatIsTooSmall(t *testing.T) {
+	ok, free, relief := canEnable("network", presence(virtualConsole, virtualDisk, virtualAudio))
+
+	if ok {
+		t.Fatal("allowed the network at a full budget")
+	}
+
+	if free != 0 {
+		t.Fatalf("reported %d free, want 0", free)
+	}
+
+	if !reflect.DeepEqual(relief, []string{"console"}) {
+		t.Errorf("suggested %v, want [console] - the only one that frees 3", relief)
 	}
 }
 

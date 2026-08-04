@@ -106,6 +106,28 @@ wait_for_stop() {
     done
 }
 
+# The server starts arecord to read the USB audio gadget. The child does not
+# die with its parent: it sees the closed pipe only when it writes, and while
+# the managed host plays nothing it blocks in the ALSA read for as long as the
+# board is up.
+#
+# An orphan holds hw:UAC1Gadget,0 exclusively, so the next server's arecord
+# fails with "Device or resource busy", spends its restart budget in about
+# three seconds, and gives up. Audio then stays dead until somebody logs in.
+#
+# The server also stops the child on SIGTERM, which is the path this script
+# takes. This is here for the paths that reach no code in the server: a
+# SIGKILL, a crash, and an operator who killed it by hand.
+#
+# Run this after the server is killed, or the server starts a new child. The
+# redirect hides the "no process killed" line, which is the normal case.
+stop_audio_capture() {
+    # SIGKILL, not SIGTERM. The child this exists for is one wedged in an ALSA
+    # read on a gadget that has been torn down underneath it, and that child
+    # does not answer SIGTERM. There is no state to flush.
+    killall -9 arecord 2>/dev/null
+}
+
 case "$1" in
   start)
     echo -n kvm > /boot/hostname.prefix
@@ -186,6 +208,12 @@ case "$1" in
     killall NanoKVM-Server
     rm -r /tmp/kvm_system /tmp/server
     wait_for_stop
+
+    # After wait_for_stop, not before it. killall only sends the signal, so a
+    # server killed a moment ago is still running - and its capture loop starts
+    # a replacement arecord the instant we kill the current one. Wait until the
+    # server is actually gone, then take the child.
+    stop_audio_capture
     echo "OK"
    ;;
 
@@ -196,6 +224,12 @@ case "$1" in
     rm -r /tmp/kvm_system /tmp/server
 
     wait_for_stop
+
+    # After wait_for_stop, not before it. killall only sends the signal, so a
+    # server killed a moment ago is still running - and its capture loop starts
+    # a replacement arecord the instant we kill the current one. Wait until the
+    # server is actually gone, then take the child.
+    stop_audio_capture
 
     # Start each run with an empty file, so the log always describes the server
     # that is running now. S99vidiag has already copied what it read to /data.

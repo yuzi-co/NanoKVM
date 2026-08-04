@@ -8,6 +8,7 @@ import {
   NetworkIcon,
   PowerIcon,
   TerminalSquareIcon,
+  Volume2Icon,
   XIcon
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -22,6 +23,10 @@ export const MenuIcons = () => {
   const [menuDisabledItems, setMenuDisabledItems] = useAtom(menuDisabledItemsAtom);
 
   const items = [
+    // The speaker also needs an audio track before it appears. This switch
+    // hides it on a device that has one, the way every other icon can be
+    // hidden.
+    { key: 'speaker', icon: <Volume2Icon size={16} /> },
     { key: 'image', icon: <DiscIcon size={16} /> },
     { key: 'download', icon: <DownloadIcon size={16} /> },
     { key: 'terminal', icon: <TerminalSquareIcon size={16} /> },

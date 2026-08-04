@@ -11,7 +11,8 @@ export const VirtualDevices = () => {
   const [isHidOnlyMode, setIsHidOnlyMode] = useState(false);
   const [isDiskEnabled, setIsDiskEnabled] = useState(false);
   const [isNetworkEnabled, setIsNetworkEnabled] = useState(false);
-  const [loading, setLoading] = useState<'' | 'disk' | 'network'>('');
+  const [isAudioEnabled, setIsAudioEnabled] = useState(false);
+  const [loading, setLoading] = useState<'' | 'disk' | 'network' | 'audio'>('');
 
   useEffect(() => {
     getHidOnlyMode();
@@ -41,12 +42,13 @@ export const VirtualDevices = () => {
 
       setIsDiskEnabled(rsp.data.disk);
       setIsNetworkEnabled(rsp.data.network);
+      setIsAudioEnabled(rsp.data.audio);
     } catch (err) {
       console.log(err);
     }
   }
 
-  async function update(device: 'disk' | 'network') {
+  async function update(device: 'disk' | 'network' | 'audio') {
     if (loading) return;
     setLoading(device);
 
@@ -105,6 +107,20 @@ export const VirtualDevices = () => {
           checked={isNetworkEnabled}
           loading={loading === 'network'}
           onChange={() => update('network')}
+        />
+      </div>
+
+      {/* Virtual Speaker */}
+      <div className="flex items-center justify-between">
+        <div className="flex flex-col space-y-1">
+          <span>{t('settings.device.audio')}</span>
+          <span className="text-xs text-neutral-500">{t('settings.device.audioDesc')}</span>
+        </div>
+
+        <Switch
+          checked={isAudioEnabled}
+          loading={loading === 'audio'}
+          onChange={() => update('audio')}
         />
       </div>
     </>

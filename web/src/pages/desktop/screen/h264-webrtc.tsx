@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Spin } from 'antd';
 import clsx from 'clsx';
-import { useAtom, useAtomValue } from 'jotai';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { w3cwebsocket as W3cWebSocket } from 'websocket';
 
 import * as storage from '@/lib/localstorage.ts';
 import { getBaseUrl } from '@/lib/service.ts';
+import { audioMutedAtom, hasAudioAtom } from '@/jotai/audio.ts';
 import { mouseStyleAtom } from '@/jotai/mouse.ts';
 import { resolutionAtom, videoScaleAtom } from '@/jotai/screen.ts';
 
@@ -27,8 +28,11 @@ export const H264Webrtc = () => {
   const mouseStyle = useAtomValue(mouseStyleAtom);
   const [videoScale, setVideoScale] = useAtom(videoScaleAtom);
   const [isLoading, setIsLoading] = useState(true);
+  const isMuted = useAtomValue(audioMutedAtom);
+  const setHasAudio = useSetAtom(hasAudioAtom);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoOfferSent = useRef(false);
   const videoIceCandidates = useRef<RTCIceCandidate[]>([]);
 
@@ -36,6 +40,7 @@ export const H264Webrtc = () => {
     const url = `${getBaseUrl('ws')}/api/stream/h264`;
     const ws = new W3cWebSocket(url);
     const videoElement = videoRef.current;
+    const audioElement = audioRef.current;
 
     let video: RTCPeerConnection | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -74,7 +79,7 @@ export const H264Webrtc = () => {
           videoOfferSent.current = true;
           const offer = await peer.createOffer({
             offerToReceiveVideo: true,
-            offerToReceiveAudio: false
+            offerToReceiveAudio: true
           });
 
           await peer.setLocalDescription(offer);
@@ -90,6 +95,13 @@ export const H264Webrtc = () => {
         if (videoElement && event.track.kind === 'video') {
           videoElement.srcObject = new MediaStream([event.track]);
         }
+
+        // An audio track arrives only when the device has the USB audio
+        // gadget, so this event is what tells the UI to offer a speaker.
+        if (audioElement && event.track.kind === 'audio') {
+          audioElement.srcObject = new MediaStream([event.track]);
+          setHasAudio(true);
+        }
       };
 
       peer.onicecandidate = (event) => {
@@ -99,6 +111,7 @@ export const H264Webrtc = () => {
       };
 
       peer.addTransceiver('video', { direction: 'recvonly' });
+      peer.addTransceiver('audio', { direction: 'recvonly' });
     };
 
     const handleVideoAnswer = (data: RTCSessionDescriptionInit) => {
@@ -207,6 +220,12 @@ export const H264Webrtc = () => {
       if (videoElement) {
         videoElement.srcObject = null;
       }
+      if (audioElement) {
+        audioElement.srcObject = null;
+      }
+      // The track goes with the peer connection, so the speaker button goes
+      // with it. A reconnect sets this again if a track still arrives.
+      setHasAudio(false);
       videoOfferSent.current = false;
       videoIceCandidates.current = [];
 
@@ -215,7 +234,7 @@ export const H264Webrtc = () => {
       }
       clearTimeout(loadingTimer);
     };
-  }, []);
+  }, [setHasAudio]);
 
   useEffect(() => {
     const scale = storage.getVideoScale();
@@ -223,6 +242,12 @@ export const H264Webrtc = () => {
       setVideoScale(scale);
     }
   }, [setVideoScale]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.muted = isMuted;
+    }
+  }, [isMuted]);
 
   return (
     <div className="relative h-full min-h-0 w-full min-w-0 overflow-hidden">
@@ -250,6 +275,7 @@ export const H264Webrtc = () => {
             setIsLoading(false);
           }}
         />
+        <audio ref={audioRef} muted autoPlay playsInline />
       </div>
 
       {isLoading && (

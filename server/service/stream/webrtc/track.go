@@ -9,6 +9,9 @@ import (
 // peer negotiated.
 const defaultPlayoutDelayExtensionID uint8 = 5
 
+// audioClockRate is the RTP clock for G.711.
+const audioClockRate = 8000
+
 // rtpExtensionProfile is the one-byte header extension profile (RFC 5285).
 const rtpExtensionProfile = 0xBEDE
 
@@ -77,6 +80,27 @@ func (t *Track) writePackets(packets []*rtp.Packet) error {
 
 		if err := t.video.WriteRTP(&packet); err != nil {
 			log.Errorf("failed to write RTP: %v", err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeAudioPackets sends one audio frame to this client's peer connection.
+//
+// The packets are shared between clients, so each one goes out through a copy.
+// Audio carries no playout delay extension: that hint is about video rendering
+// and the browser's own jitter buffer handles the rest.
+func (t *Track) writeAudioPackets(packets []*rtp.Packet) error {
+	for _, source := range packets {
+		packet := rtp.Packet{Header: source.Header, Payload: source.Payload}
+
+		packet.Header.Extension = false
+		packet.Header.Extensions = nil
+
+		if err := t.audio.WriteRTP(&packet); err != nil {
+			log.Errorf("failed to write audio RTP: %v", err)
 			return err
 		}
 	}

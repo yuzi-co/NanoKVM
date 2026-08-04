@@ -84,8 +84,13 @@ not lose its audio as well.
 
 - `kvmapp/system/init.d/S03usbdev` creates `uac1.usb0` when `/boot/usb.uac` exists, and links it
   **last**. configfs numbers interfaces in link order, so a function inserted ahead of the HID ones
-  renumbers the keyboard and the mice under a host that is already bound to them. The file already
-  carries this warning for the ACM function.
+  renumbers the keyboard and the mice under a host that is already bound to them.
+
+  An earlier draft of this document said the file already carried that warning for its ACM function.
+  It does not, on this branch. The ACM block lives on `fix/usb-acm-console` and in the device's own
+  `/etc/init.d/S03usbdev`, which is a different file from the repository's copy. The measurements
+  quoted elsewhere in this document were taken on the device, where ACM is present; the code changes
+  land in the repository's copy, where it is not.
 - `server/service/vm/virtual-device.go` gains an `audio` case beside `network` and `disk`.
   `server/proto` gains an `Audio` field in the response and accepts `audio` in the request. The
   route does not change.

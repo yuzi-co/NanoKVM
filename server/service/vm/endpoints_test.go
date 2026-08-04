@@ -125,6 +125,33 @@ func TestCanEnableOnlySuggestsFunctionsThatFreeEnough(t *testing.T) {
 	}
 }
 
+// The case above cannot catch the filter being deleted: with the console and
+// the disk enabled, one endpoint is free, the network needs two more, and both
+// candidates clear that bar - so removing the filter returns the same list.
+//
+// This one discriminates. console(3) + disk(2) + audio(1) + hid(3) is exactly 9
+// and the network needs all three of its endpoints back, so only the console
+// can supply them on its own. A build with no filter would answer
+// [audio disk console] and send the operator to turn off a speaker that frees
+// one of the three endpoints it needs.
+//
+// This filter has already been deleted once during this task. It stays tested.
+func TestCanEnableWillNotSuggestAFunctionThatIsTooSmall(t *testing.T) {
+	ok, free, relief := canEnable("network", presence(virtualConsole, virtualDisk, virtualAudio))
+
+	if ok {
+		t.Fatal("allowed the network at a full budget")
+	}
+
+	if free != 0 {
+		t.Fatalf("reported %d free, want 0", free)
+	}
+
+	if !reflect.DeepEqual(relief, []string{"console"}) {
+		t.Errorf("suggested %v, want [console] - the only one that frees 3", relief)
+	}
+}
+
 func TestEndpointCostRejectsUnknownNames(t *testing.T) {
 	if _, ok := endpointCost("speaker"); ok {
 		t.Error("endpointCost accepted a name it does not know")

@@ -61,6 +61,25 @@ prepare_runtime_state() {
     link_runtime_file state
 }
 
+# The server starts arecord to read the USB audio gadget. The child does not
+# die with its parent: it sees the closed pipe only when it writes, and while
+# the managed host plays nothing it blocks in the ALSA read for as long as the
+# board is up.
+#
+# An orphan holds hw:UAC1Gadget,0 exclusively, so the next server's arecord
+# fails with "Device or resource busy", spends its restart budget in about
+# three seconds, and gives up. Audio then stays dead until somebody logs in.
+#
+# The server also stops the child on SIGTERM, which is the path this script
+# takes. This is here for the paths that reach no code in the server: a
+# SIGKILL, a crash, and an operator who killed it by hand.
+#
+# Run this after the server is killed, or the server starts a new child. The
+# redirect hides the "no process killed" line, which is the normal case.
+stop_audio_capture() {
+    killall arecord 2>/dev/null
+}
+
 case "$1" in
   start)
     echo -n kvm > /boot/hostname.prefix
@@ -139,6 +158,7 @@ case "$1" in
   stop)
     killall kvm_system
     killall NanoKVM-Server
+    stop_audio_capture
     rm -r /tmp/kvm_system /tmp/server
     echo "OK"
    ;;
@@ -146,6 +166,7 @@ case "$1" in
   restart)
     killall kvm_system
     killall NanoKVM-Server
+    stop_audio_capture
 
     # Start each run with an empty file, so the log always describes the server
     # that is running now. The server is stopped, so nothing writes to the file

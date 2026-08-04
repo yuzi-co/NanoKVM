@@ -66,7 +66,7 @@ This package knows nothing about WebRTC. It produces 20 ms frames of mu-law and 
 | ---- | -------------- |
 | `audio.go` | The package API: `Available() bool`, `Start() error`, `Stop()`, and `Frames() <-chan []byte`. Each frame is 20 ms of mu-law. `Stop` kills the child and closes the channel. |
 | `source.go` | Owns the `arecord` child process. Restarts it with backoff. Emits raw 48 kHz stereo `S16_LE` chunks. |
-| `resample.go` | Downmixes stereo to mono and decimates 6:1 through an anti-alias FIR with a passband edge at 3.4 kHz and stopband rejection from 4 kHz, the Nyquist limit of the 8 kHz output. Pure functions. |
+| `resample.go` | Downmixes stereo to mono and decimates 6:1 through an anti-alias FIR: half gain at 3.4 kHz, stopband from about 4 kHz, which is the Nyquist limit of the 8 kHz output. A Hamming window needs roughly `3.3 * rate / width` taps for that transition, so the filter has 129. Pure functions. |
 | `g711.go` | Encodes mu-law. Pure functions. |
 
 ### Changes to `server/service/stream/webrtc`
@@ -174,21 +174,26 @@ the next tick, would hang here.
 | --------- | --------- |
 | `UAC1Gadget` card absent | No track offered to that client. Rechecked on the next connection, because the switch can add the card at any time. |
 | `arecord` binary absent | Audio off for the life of the process. Logged once. |
-| `arecord` exits during a stream | Restart with backoff, doubling from 200 ms to a 5 s cap. After five restarts inside one minute, mark audio failed for the life of the process and stop offering the track. |
+| `arecord` exits during a stream | Restart with backoff, doubling from 200 ms to a 5 s cap. After five restarts inside one minute, end the stream. The frame channel closes, the send loop returns, and the manager forgets the stream, so the next viewer to connect starts a fresh one. Giving up for the life of the process would turn a transient fault, such as the gadget being rebuilt underneath us, into a permanent one. |
 | Host plays nothing | The read blocks. This is the normal state. No packets, no CPU, silence in the browser. |
 | Client falls behind | The slot drops one 20 ms frame, which is one click. Counted the way dropped video frames are counted. |
 | Last viewer leaves, or the server stops | Kill the child, wait for it, reap it. No zombie. |
 
 ## Cost
 
-`arecord` measures 1232 kB RSS on the device. The FIR runs about 48000 multiply-accumulate
-operations per second. Both are small next to the 75 MB ION carveout the video pipeline holds.
+`arecord` measures 1232 kB RSS on the device. The FIR runs 129 multiply-accumulate operations per
+output sample, and there are 8000 output samples per second, so about one million per second. Both
+are small next to the 75 MB ION carveout the video pipeline holds.
 
 ## Testing
 
 `resample.go` and `g711.go` are pure and get table tests: a known sine downmixed and decimated, and
-mu-law encoding checked against the ITU G.711 reference values. The 6:1 decimator is tested for
-attenuation above 4 kHz, because rejecting that band is the reason it exists.
+mu-law encoding checked against the ITU G.711 reference values.
+
+The decimator is tested at 4.5 kHz as well as 6 kHz. 6 kHz alone is not a real test: it sits far
+into the stopband of even a short filter, so it passes whether or not the filter is long enough.
+The band that decides the tap count is the one just above Nyquist, which folds back on top of
+speech.
 
 `source.go` takes the command it runs as a field, so a fake command exercises the restart path, the
 backoff, and the give-up threshold without ALSA.

@@ -18,7 +18,9 @@
 - Dropping a function at boot **never deletes its `/boot` marker**.
 - `usb.ncm` and `usb.rndis0` select the same network function and are counted **once**.
 - Turning a function **off** is always permitted and never budget-checked.
-- Device names used by the API are exactly `disk`, `network`, `audio`. The console has no toggle.
+- Device names used by the API are exactly `console`, `disk`, `network`, `audio`.
+- The console unmount must remove only the `configs/c.1` symlink. `rmdir functions/acm.GS0`
+  blocks forever, because the getty respawning on `/dev/ttyGS0` holds it open.
 - All Go tests must pass with `-tags novision`.
 - Shell must be POSIX and run under busybox ash. No bashisms, no `local`.
 - Init scripts must be LF. A CRLF init script does not run on the device.
@@ -251,15 +253,39 @@ func TestEndpointCostRejectsUnknownNames(t *testing.T) {
 	}
 }
 
-// The console is accounted for but has no toggle, so the API must not offer it
-// as a device somebody can switch on.
-func TestConsoleIsAccountedButNotTogglable(t *testing.T) {
+// The console claims three of the nine endpoints - the largest single share
+// after HID - so it needs a switch like the rest. A budget display that shows
+// the operator a full bar while offering no way to free the biggest consumer
+// states the problem and withholds the answer.
+func TestConsoleIsTogglableLikeTheOthers(t *testing.T) {
 	if _, ok := endpointCost("console"); !ok {
 		t.Error("the console is missing from the table")
 	}
 
-	if _, _, _, ok := commandsFor("console"); ok {
-		t.Error("commandsFor offers the console as a togglable device")
+	function, ok := functionForDevice("console")
+	if !ok {
+		t.Fatal("no function answers to the device name \"console\"")
+	}
+
+	if function.markers[0] != virtualConsole {
+		t.Errorf("the console is gated on %q, want %q", function.markers[0], virtualConsole)
+	}
+}
+
+// Every entry in the table that has a device name must be reachable through
+// the toggle, and every name the toggle accepts must be in the table. A name in
+// one and not the other is a switch that reports success and changes nothing,
+// or a function the budget cannot see.
+func TestEveryTogglableFunctionHasCommands(t *testing.T) {
+	for _, function := range usbFunctions {
+		if function.device == "" {
+			t.Errorf("%s has no device name, so nothing can switch it", function.name)
+			continue
+		}
+
+		if _, _, _, ok := commandsFor(function.device); !ok {
+			t.Errorf("commandsFor does not know %q", function.device)
+		}
 	}
 }
 
@@ -340,7 +366,7 @@ type usbFunction struct {
 // board whose network is gone. Audio is last because it is the only entry that
 // costs nothing to lose.
 var usbFunctions = []usbFunction{
-	{name: "console", device: "", markers: []string{virtualConsole}, cost: 3, priority: 40},
+	{name: "console", device: "console", markers: []string{virtualConsole}, cost: 3, priority: 40},
 	{name: "disk", device: "disk", markers: []string{virtualDisk}, cost: 2, priority: 30},
 	{name: "network", device: "network", markers: []string{virtualNetworkNCM, virtualNetwork}, cost: 3, priority: 20},
 	{name: "audio", device: "audio", markers: []string{virtualAudio}, cost: 1, priority: 10},
@@ -1314,6 +1340,7 @@ func TestEveryFunctionNamesItsGadgetDirectory(t *testing.T) {
 		"audio":   "uac1.usb0",
 	}
 
+
 	for _, function := range usbFunctions {
 		if function.name == "network" {
 			// Two possible directories, checked separately below.
@@ -1433,7 +1460,54 @@ cd server && go test -tags novision ./service/vm/ -v
 
 Expected: PASS.
 
-- [ ] **Step 5: Change the response shape**
+- [ ] **Step 5: Give the console a toggle**
+
+The console is the only function with no switch, and it claims three of the nine endpoints - the
+largest share after HID. A budget bar reading `9 of 9` with no way to free the biggest consumer
+states the problem and withholds the answer.
+
+`virtualConsole` is already defined in `endpoints.go` from Task 1. Do **not** declare the path a
+second time here - use that constant.
+
+In `server/service/vm/virtual-device.go`, add the command lists beside the existing ones:
+
+```go
+	mountConsoleCommands = []string{
+		"touch /boot/usb.acm",
+		"/etc/init.d/S03usbdev stop",
+		"/etc/init.d/S03usbdev start",
+	}
+
+	// The function directory stays. `rmdir functions/acm.GS0` blocks forever:
+	// /etc/inittab respawns a getty on /dev/ttyGS0, so the character device
+	// always has a holder, and recovering from that wedge needs a full teardown
+	// of the gadget. Remove the config symlink and nothing else - the same rule
+	// the audio function follows.
+	unmountConsoleCommands = []string{
+		"/etc/init.d/S03usbdev stop",
+		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/acm.GS0",
+		"rm /boot/usb.acm",
+		"/etc/init.d/S03usbdev start",
+	}
+```
+
+And the case in `commandsFor`:
+
+```go
+	case "console":
+		return virtualConsole, mountConsoleCommands, unmountConsoleCommands, true
+```
+
+- [ ] **Step 6: Run the console tests and watch them pass**
+
+```shell
+cd D:/projects/NanoKVM/server && MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/src" -v nanokvm-gomod:/go/pkg/mod -w /src -e CGO_ENABLED=0 golang:1.25 go test -tags novision ./service/vm/ -run "TestConsole|TestEveryTogglable|TestCommandsFor" -v
+```
+
+Expected: PASS. `TestCommandsForAudioRemovesOnlyTheSymlink` already asserts no `rmdir` appears in
+an unmount list; confirm the console list obeys the same rule by reading it.
+
+- [ ] **Step 7: Change the response shape**
 
 In `server/proto/vm.go`, replace lines 67-72:
 
@@ -1459,6 +1533,7 @@ type VirtualDeviceState struct {
 }
 
 type GetVirtualDeviceRsp struct {
+	Console VirtualDeviceState `json:"console"`
 	Network VirtualDeviceState `json:"network"`
 	Disk    VirtualDeviceState `json:"disk"`
 	Audio   VirtualDeviceState `json:"audio"`
@@ -1469,7 +1544,7 @@ type GetVirtualDeviceRsp struct {
 
 `Media` is removed. It is declared, never set by the server, and never read by the frontend.
 
-- [ ] **Step 6: Report the new shape**
+- [ ] **Step 8: Report the new shape**
 
 In `server/service/vm/virtual-device.go`, replace `GetVirtualDevice` with:
 
@@ -1496,6 +1571,7 @@ func (s *Service) GetVirtualDevice(c *gin.Context) {
 	}
 
 	rsp.OkRspWithData(c, &proto.GetVirtualDeviceRsp{
+		Console: state("console"),
 		Network: state("network"),
 		Disk:    state("disk"),
 		Audio:   state("audio"),
@@ -1507,7 +1583,7 @@ func (s *Service) GetVirtualDevice(c *gin.Context) {
 }
 ```
 
-- [ ] **Step 7: Refuse the toggle**
+- [ ] **Step 9: Refuse the toggle**
 
 In `server/service/vm/virtual-device.go`, inside `UpdateVirtualDevice`, replace:
 
@@ -1540,7 +1616,7 @@ with:
 	}
 ```
 
-- [ ] **Step 8: Run the tests**
+- [ ] **Step 10: Run the tests**
 
 ```shell
 cd server && go vet -tags novision ./... && go test -tags novision ./... 2>&1 | tail -20
@@ -1548,7 +1624,7 @@ cd server && go vet -tags novision ./... && go test -tags novision ./... 2>&1 | 
 
 Expected: PASS, no vet findings.
 
-- [ ] **Step 9: Cross-compile for the device**
+- [ ] **Step 11: Cross-compile for the device**
 
 ```shell
 cd server && CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -tags novision ./...
@@ -1556,7 +1632,7 @@ cd server && CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -tags novision ./.
 
 Expected: no output.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 12: Commit**
 
 ```shell
 git add server/proto/vm.go server/service/vm/virtual-device.go server/service/vm/endpoints.go server/service/vm/endpoints_test.go
@@ -1573,7 +1649,7 @@ git commit -m "Refuse a virtual device that does not fit, and report what is run
 - Modify: `web/src/i18n/locales/en.ts:400-407`
 
 **Interfaces:**
-- Consumes: the JSON shape from Task 4 — `{network, disk, audio: {enabled, active, cost}, used, total}`, and the error `msg` string from a refused toggle.
+- Consumes: the JSON shape from Task 4 — `{console, network, disk, audio: {enabled, active, cost}, used, total}`, and the error `msg` string from a refused toggle.
 - Produces: nothing other tasks depend on.
 
 - [ ] **Step 1: Type the response**
@@ -1583,7 +1659,7 @@ Replace the whole of `web/src/api/virtual-device.ts`:
 ```ts
 import { http } from '@/lib/http.ts';
 
-export type VirtualDeviceName = 'disk' | 'network' | 'audio';
+export type VirtualDeviceName = 'console' | 'disk' | 'network' | 'audio';
 
 // enabled is the /boot marker, active is the function the running gadget
 // actually carries. They differ when the USB controller ran out of endpoints.
@@ -1594,6 +1670,7 @@ export type VirtualDeviceState = {
 };
 
 export type VirtualDevices = {
+  console: VirtualDeviceState;
   network: VirtualDeviceState;
   disk: VirtualDeviceState;
   audio: VirtualDeviceState;
@@ -1640,6 +1717,10 @@ with:
         audio: 'Virtual Speaker',
         audioDesc:
           'Present a USB sound card to the remote host, so you can hear it. The host must select it as its output device. Switching this rebuilds the USB connection.',
+        console: 'Serial Console',
+        consoleDesc: 'Present a USB serial port to the remote host, for logging in to this NanoKVM when the network is unreachable',
+        consoleTip:
+          'Anyone who controls the remote host gets a login prompt on this NanoKVM. Set a strong password before enabling (Account - Change Password).',
         endpoints: {
           title: 'USB endpoints',
           used: '{{used}} of {{total}} used',
@@ -1755,6 +1836,10 @@ export const VirtualDevices = () => {
           <span>{t(`settings.device.${device}`)}</span>
           <span className="text-xs text-neutral-500">{t(`settings.device.${device}Desc`)}</span>
 
+          {device === 'console' && (
+            <span className="text-xs text-amber-500">{t('settings.device.consoleTip')}</span>
+          )}
+
           {state.enabled && !state.active && (
             <span className="text-xs text-amber-500">
               {t('settings.device.endpoints.inactive')}
@@ -1811,6 +1896,7 @@ export const VirtualDevices = () => {
 
       {refusal && <span className="text-xs text-red-500">{refusal}</span>}
 
+      {row('console')}
       {row('disk')}
       {row('network')}
       {row('audio')}
@@ -1923,6 +2009,8 @@ In the web UI, `Settings > Device`:
    needs 3 and only 2 are free. This is the case a naive UI gets wrong by enabling anything as
    soon as the bar is not full.
 3. Turn the speaker off. The line reads `6 of 9` and the network becomes available.
+4. Turn the serial console off. The line drops by 3 and `/boot/usb.acm` is gone. Turn it back on
+   and confirm `/dev/ttyGS0` returns. The console row shows its security warning in both states.
 
 - [ ] **Step 6: Restore the working configuration**
 
@@ -1967,6 +2055,8 @@ git commit -m "Record the endpoint budget and how it was proved on hardware"
 | Refusal names what to turn off | 1, 4 |
 | `enabled` vs `active` reporting | 4 |
 | `Media` removed | 4 |
+| Serial console gets a toggle | 1 (table), 4 (commands, response), 5 (row + warning), 6 (hardware) |
+| Console unmount removes only the symlink | 4, asserted by the existing no-`rmdir` test |
 | Network counted once | 1, 2 |
 | One table two languages, pinned by a test | 3 |
 | UI budget line, per-row cost, disabled switch, inactive warning | 5 |

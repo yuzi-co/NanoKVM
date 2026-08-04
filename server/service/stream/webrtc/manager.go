@@ -46,6 +46,7 @@ func NewWebRTCManager() *WebRTCManager {
 
 func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
 	go client.write()
+	go client.writeAudio()
 
 	m.mutex.Lock()
 	m.clients[ws] = client

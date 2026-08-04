@@ -119,6 +119,15 @@ func (c *Client) write() {
 	}
 }
 
+// startWriters starts write and writeAudio at most once for this client's
+// lifetime, no matter how many times AddClient runs for it.
+func (c *Client) startWriters() {
+	c.writersOnce.Do(func() {
+		go c.write()
+		go c.writeAudio()
+	})
+}
+
 // stop releases the writer and waits for it to let go of the connection.
 func (c *Client) stop() {
 	c.slot.Close()

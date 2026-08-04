@@ -47,6 +47,16 @@ type Client struct {
 	audioSlot *stream.FrameSlot[[]*rtp.Packet]
 	audioDone chan struct{}
 
+	// writersOnce starts write and writeAudio at most once for this Client's
+	// whole lifetime. It has to live here rather than on the manager's client
+	// map: ICE can flap Connected -> Disconnected -> Connected, which drives
+	// AddClient -> RemoveClient -> AddClient on the same *Client pointer, and
+	// RemoveClient already closed both slots by the time the second AddClient
+	// runs. Gating on map membership would restart both writers, and each
+	// one's first Take() would return immediately and close an already-closed
+	// channel.
+	writersOnce sync.Once
+
 	// waitingForKeyFrame is read and written only by the capture goroutine.
 	waitingForKeyFrame bool
 }

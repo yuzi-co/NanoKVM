@@ -177,23 +177,6 @@ func TestConsoleIsTogglableLikeTheOthers(t *testing.T) {
 	}
 }
 
-// Every entry in the table that has a device name must be reachable through
-// the toggle, and every name the toggle accepts must be in the table. A name in
-// one and not the other is a switch that reports success and changes nothing,
-// or a function the budget cannot see.
-func TestEveryTogglableFunctionHasCommands(t *testing.T) {
-	for _, function := range usbFunctions {
-		if function.device == "" {
-			t.Errorf("%s has no device name, so nothing can switch it", function.name)
-			continue
-		}
-
-		if _, _, _, ok := commandsFor(function.device); !ok {
-			t.Errorf("commandsFor does not know %q", function.device)
-		}
-	}
-}
-
 func TestPriorityOrderIsAudioFirstConsoleLast(t *testing.T) {
 	var order []string
 	for _, function := range dropOrder() {

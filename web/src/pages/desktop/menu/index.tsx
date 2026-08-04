@@ -5,6 +5,7 @@ import { useAtomValue } from 'jotai';
 import { GripVerticalIcon } from 'lucide-react';
 import Draggable, { DraggableData, DraggableEvent } from 'react-draggable';
 
+import { hasAudioAtom } from '@/jotai/audio.ts';
 import { menuDisabledItemsAtom } from '@/jotai/settings.ts';
 import { useMenuBounds } from '@/hooks/useMenuBounds.ts';
 import { useMenuVisibility } from '@/hooks/useMenuVisibility.ts';
@@ -28,6 +29,7 @@ export const Menu = () => {
   const nodeRef = useRef<HTMLDivElement | null>(null);
 
   const menuDisabledItems = useAtomValue(menuDisabledItemsAtom);
+  const hasAudio = useAtomValue(hasAudioAtom);
 
   const {
     isInitialized,
@@ -91,7 +93,10 @@ export const Menu = () => {
             <Screen />
             <Keyboard />
             <Mouse />
-            {isEnabled('speaker') && <Speaker />}
+            {/* hasAudio comes from the peer connection's ontrack event. A
+                device without the USB audio gadget offers no audio track, and
+                the button would then unmute an <audio> with no stream in it. */}
+            {isEnabled('speaker') && hasAudio && <Speaker />}
             <Divider type="vertical" />
 
             {isEnabled('image') && <Image />}

@@ -36,6 +36,12 @@ type Client struct {
 	slot *stream.FrameSlot[[]*rtp.Packet]
 	done chan struct{}
 
+	// audioSlot holds at most one pending audio frame, with its own writer
+	// goroutine. Sharing the video slot would drop audio whenever video fell
+	// behind, and the two have nothing to do with each other.
+	audioSlot *stream.FrameSlot[[]*rtp.Packet]
+	audioDone chan struct{}
+
 	// waitingForKeyFrame is read and written only by the capture goroutine.
 	waitingForKeyFrame bool
 }
@@ -53,6 +59,9 @@ type SignalingHandler struct {
 
 type Track struct {
 	video rtpWriter
+
+	// audio is nil when the gadget had no capture card at negotiation time.
+	audio rtpWriter
 
 	// extensionID is negotiated on the websocket goroutine and read on the
 	// capture goroutine.

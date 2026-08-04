@@ -62,6 +62,39 @@ func TestWriteAudioPacketsCarriesNoHeaderExtension(t *testing.T) {
 	}
 }
 
+// One audio frame is packetized once and handed to every listener, so these
+// packets are shared. writeAudioPackets clears the extension flag and the
+// extension slice on the header it writes, and doing that to the shared packet
+// rather than to a copy would reach into the frame the next client is about to
+// be given. Video carries the same test because the equivalent was once a real
+// bug there.
+func TestWriteAudioPacketsLeavesTheSharedPacketsAlone(t *testing.T) {
+	packets := audioFrame()
+
+	// A shared frame can arrive carrying an extension: the packetizer is not
+	// the only thing that ever touches these headers, and a test whose input
+	// already matches the output proves nothing.
+	packets[0].Header.Extension = true
+	packets[0].Header.ExtensionProfile = rtpExtensionProfile
+	if err := packets[0].Header.SetExtension(5, []byte{1, 2}); err != nil {
+		t.Fatalf("failed to set up the shared packet: %s", err)
+	}
+
+	track := &Track{audio: &recordingWriter{}}
+	if err := track.writeAudioPackets(packets); err != nil {
+		t.Fatalf("writeAudioPackets returned %s", err)
+	}
+
+	for i, packet := range packets {
+		if !packet.Header.Extension {
+			t.Fatalf("packet %d was mutated: the extension flag was cleared on the shared copy", i)
+		}
+		if len(packet.Header.Extensions) != 1 {
+			t.Fatalf("packet %d was mutated: extensions dropped from the shared copy", i)
+		}
+	}
+}
+
 func TestWriteAudioDrainsTheSlotUntilClosed(t *testing.T) {
 	writer := &recordingWriter{}
 
@@ -257,6 +290,58 @@ func TestStopAudioStreamIfIdleClearsTheFlag(t *testing.T) {
 
 	if sending {
 		t.Error("stopAudioStreamIfIdle left the stream marked as sending")
+	}
+}
+
+// The stop condition mirrors the start condition, and a client alone is not
+// the start condition. A viewer that connected while the gadget had no card
+// carries no audio track for its whole life, so capture that kept running for
+// it would run arecord, the FIR and the packetizer with nobody able to hear
+// any of it, for as long as that viewer stayed.
+func TestStopAudioStreamIfIdleStopsWhileAVideoOnlyClientRemains(t *testing.T) {
+	manager := NewWebRTCManager()
+
+	videoOnly := newTestClient()
+	manager.storeClient(&websocket.Conn{}, videoOnly)
+
+	manager.mutex.Lock()
+	manager.audioSending = true
+	manager.mutex.Unlock()
+
+	manager.stopAudioStreamIfIdle()
+
+	manager.mutex.Lock()
+	sending := manager.audioSending
+	manager.mutex.Unlock()
+
+	if sending {
+		t.Error("capture kept running for a client that negotiated no audio track")
+	}
+}
+
+// The other half of the same condition: a listener that is still connected
+// keeps capture alive when some other viewer leaves.
+func TestStopAudioStreamIfIdleKeepsCaptureForAListener(t *testing.T) {
+	manager := NewWebRTCManager()
+
+	listener := newTestClient()
+	listener.mutex.Lock()
+	listener.track.audio = &recordingWriter{}
+	listener.mutex.Unlock()
+	manager.storeClient(&websocket.Conn{}, listener)
+
+	manager.mutex.Lock()
+	manager.audioSending = true
+	manager.mutex.Unlock()
+
+	manager.stopAudioStreamIfIdle()
+
+	manager.mutex.Lock()
+	sending := manager.audioSending
+	manager.mutex.Unlock()
+
+	if !sending {
+		t.Error("capture stopped while a client with an audio track was still connected")
 	}
 }
 

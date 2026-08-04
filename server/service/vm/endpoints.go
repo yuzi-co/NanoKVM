@@ -49,7 +49,7 @@ type usbFunction struct {
 // board whose network is gone. Audio is last because it is the only entry that
 // costs nothing to lose.
 var usbFunctions = []usbFunction{
-	{name: "console", device: "", markers: []string{virtualConsole}, cost: 3, priority: 40},
+	{name: "console", device: "console", markers: []string{virtualConsole}, cost: 3, priority: 40},
 	{name: "disk", device: "disk", markers: []string{virtualDisk}, cost: 2, priority: 30},
 	{name: "network", device: "network", markers: []string{virtualNetworkNCM, virtualNetwork}, cost: 3, priority: 20},
 	{name: "audio", device: "audio", markers: []string{virtualAudio}, cost: 1, priority: 10},

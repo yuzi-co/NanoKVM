@@ -158,6 +158,19 @@ start_usb_dev(){
             # Legacy BIOS reads no 0x55AA signature and hangs in a HLT loop.
     fi
 
+    # A USB sound card for the managed host, off unless /boot/usb.uac exists.
+    # The host has to select it as its output device; nothing here can do that.
+    #
+    # Add it last, for the same reason the ACM function is added last: configfs
+    # numbers interfaces in link order, and a function inserted ahead of the HID
+    # ones renumbers the keyboard and the mice under a host that is already
+    # bound to them.
+    if [ -e /boot/usb.uac ]
+    then
+        mkdir functions/uac1.usb0
+        ln -s functions/uac1.usb0 configs/c.1
+    fi
+
     ls /sys/class/udc/ | cat > UDC
     echo device > /proc/cviusb/otg_role
 }

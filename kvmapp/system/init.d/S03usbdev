@@ -76,8 +76,9 @@ usb_keep_order() {
     echo "console disk network audio"
 }
 
-# usb_drop_order is the same ranking read backwards. It is what the Go copy of
-# the table is compared against, and a test asserts the two are exact reverses.
+# usb_drop_order is the same ranking read backwards. It is compared directly
+# against dropOrder() in the Go table, which sorts the same functions by
+# priority ascending, and a test asserts the two lists match entry for entry.
 usb_drop_order() {
     echo "audio network disk console"
 }

@@ -45,6 +45,27 @@ used_case "hid + disk + network"         "disk network"                8
 used_case "everything"                   "console disk network audio"  12
 
 echo
+echo "===== usb_hid_cost, unstubbed ====="
+# Every case above stubs usb_hid_cost so the arithmetic can pick HID's cost
+# directly. That leaves the real function itself untested: a mutation that
+# charges HID nothing would let console+disk+network+audio (9) through the
+# budget on top of the 3 endpoints HID actually uses, the gadget would ask
+# for 12 against 9, and the bind would fail with all HID gone.
+hid_cost_case() {
+    desc="$1"; marker="$2"; want="$3"
+    got=$(WORK="$WORK" MARKER="$marker" sh -c '
+        . "$WORK/budget.sh"
+        BOOT="$WORK/boot-hidcost-$$"; mkdir -p "$BOOT"
+        [ -n "$MARKER" ] && : > "$BOOT/$MARKER"
+        usb_marker() { [ -e "$BOOT/$1" ]; }
+        usb_hid_cost
+    ')
+    [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
+}
+hid_cost_case "hid built by default"       ""            3
+hid_cost_case "disable_hid marker present" disable_hid   0
+
+echo
 echo "===== resolving a set that does not fit ====="
 # Audio goes first, then the network. The console outranks both because it is
 # the only way into a board whose network is gone.
@@ -152,6 +173,31 @@ got=$(echo $got)
                        || note "gave [$got], want [network]" FAIL
 
 echo
+echo "===== usb_enabled reads the marker each function actually ships with ====="
+# Only the network pair was exercised above. A typo in one of the other three
+# markers (usb.uac -> usb.uac1, usb.disk0 -> usb.disk, usb.acm -> usb.acm2)
+# would make usb_enabled silently under-report what is on, usb_resolve would
+# then approve an over-budget set because it never sees the function it
+# missed, and the gadget would refuse to bind.
+enabled_n=0
+enabled_case() {
+    marker="$1"; want="$2"
+    enabled_n=$((enabled_n + 1))
+    got=$(WORK="$WORK" N="$enabled_n" MARKER="$marker" sh -c '
+        . "$WORK/budget.sh"
+        BOOT="$WORK/boot-enabled-$N"; mkdir -p "$BOOT"
+        : > "$BOOT/$MARKER"
+        usb_marker() { [ -e "$BOOT/$1" ]; }
+        usb_enabled
+    ')
+    got=$(echo $got)
+    [ "$got" = "$want" ] && note "$marker enables [$want]" OK || note "$marker gave [$got], want [$want]" FAIL
+}
+enabled_case usb.acm   console
+enabled_case usb.disk0 disk
+enabled_case usb.uac   audio
+
+echo
 echo "===== the script still parses ====="
 sh -n "$SV" && note "S03usbdev is valid shell" OK || note "S03usbdev does not parse" FAIL
 
@@ -160,9 +206,33 @@ sh -n "$SV" && note "S03usbdev is valid shell" OK || note "S03usbdev does not pa
 grep -q 'usb_keep=\$(usb_resolve ' "$SV" \
     && note "start_usb_dev resolves the enabled set" OK \
     || note "the budget block is never called" FAIL
-grep -q 'usb_kept console' "$SV" \
-    && note "the console is built from the resolved set, not its marker" OK \
-    || note "the console still tests its marker directly" FAIL
+
+# Each function must be gated on usb_kept, not reconstructed from a marker
+# test that the resolve step never touches. Anchored to the exact indentation
+# and the exact end of the line, so a commented-out gate - which a plain
+# substring grep would still count as present - reports as missing.
+gate_case() {
+    desc="$1"; pattern="$2"
+    grep -qE "$pattern" "$SV" \
+        && note "$desc is gated on usb_kept" OK \
+        || note "$desc still tests its marker directly" FAIL
+}
+gate_case "the console"        '^    if usb_kept console$'
+gate_case "the disk"           '^    if usb_kept disk$'
+gate_case "ncm"                '^    if usb_kept network && \[ -e /boot/usb\.ncm \]$'
+gate_case "rndis0"             '^        if usb_kept network && \[ -e /boot/usb\.rndis0 \]$'
+gate_case "the os_desc block"  '^    if usb_kept network$'
+gate_case "audio"              '^    if usb_kept audio$'
+
+# The one gate that must never appear. HID is the one function with no
+# exception - a "usb_kept hid" here would always be false, because hid never
+# appears in usb_keep_order, and every boot would come up without a keyboard.
+hid_block=$(sed -n '/^    if \[ ! -e \/boot\/disable_hid \]$/,/^    fi$/p' "$SV")
+if [ -n "$hid_block" ] && ! printf '%s\n' "$hid_block" | grep -q usb_kept; then
+    note "HID is gated only on its own marker, never on usb_kept" OK
+else
+    note "HID's gate changed, or now depends on usb_kept" FAIL
+fi
 
 # Dropping must not delete the operator's marker: intent has to survive so the
 # function returns on its own once something else is switched off.

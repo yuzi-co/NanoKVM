@@ -225,6 +225,28 @@ escalate_case "crash loop exactly at the floor"                restart 5  0  600
 escalate_case "hang exactly at the floor"                      hung    0  2  600  yes  yes
 
 echo
+echo "  --- a guard that inverts its own meaning on bad input is not a guard"
+# `[ "" -lt 600 ]` is an error, not a false comparison. The `if` is false, so the
+# floor is skipped and the board reboots at whatever uptime it has. `up` comes
+# from `cut -d. -f1 /proc/uptime`, and any failure to fork that - memory
+# pressure, PID exhaustion, a stalled filesystem - yields an empty string. A typo
+# in SUPERVISE_REBOOT_FLOOR opens the same hole from the other side.
+#
+# These cases cannot use escalate_case: field splitting cannot produce an empty
+# argument, and the threshold ones have to set a variable before sourcing.
+got=$(WORK="$WORK" sh -c '. "$WORK/escalate.sh"; should_reboot hung 0 2 "" yes')
+[ "$got" = no ] && note "an uptime that could not be read -> $got" OK \
+                || note "an uptime that could not be read -> $got, want no" FAIL
+
+got=$(WORK="$WORK" sh -c '. "$WORK/escalate.sh"; should_reboot restart 5 0 abc yes')
+[ "$got" = no ] && note "an uptime that is not a number -> $got" OK \
+                || note "an uptime that is not a number -> $got, want no" FAIL
+
+got=$(WORK="$WORK" sh -c 'REBOOT_FLOOR=ten; . "$WORK/escalate.sh"; should_reboot restart 5 0 10 yes')
+[ "$got" = no ] && note "a floor that is not a number -> $got" OK \
+                || note "a floor that is not a number -> $got, want no" FAIL
+
+echo
 echo "===== counting the runs that did not last ====="
 # The threshold is 30s and not the one second the process actually survives.
 # watch_loop sleeps INTERVAL between checks and resets `started` after each

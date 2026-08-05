@@ -76,6 +76,18 @@ mutate "a short run does not accumulate"   's/echo \$(( \$2 + 1 ))/echo 1/'
 mutate "the first hang counts as a failure" 's/"\$1" -gt 0/"\$1" -ge 0/'
 
 echo
+echo "== clearing the counters"
+# should_clear exists because action() reports healthy for a process that is up
+# and not answering yet, and the hang branch resets LAST_OK after every cure -
+# so clearing on the verdict name alone would wipe the counters before the
+# counted hang escalation could ever reach its threshold.
+mutate "any healthy verdict clears the counters" 's/if \[ "\$2" = yes \]/if true/'
+# A single-line s/// cannot reach across the "stopped)" / "echo yes" pair, so
+# this addresses the stopped case and pulls its next line into the pattern
+# space with N before substituting - portable to busybox sed as well as GNU.
+mutate "a deliberate stop does not clear"  '/stopped)/{N;s/echo yes/echo no/}'
+
+echo
 if [ "$fails" -eq 0 ]; then
     echo "===== every mutation was caught ====="
 else

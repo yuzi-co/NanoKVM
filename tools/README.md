@@ -246,11 +246,17 @@ because the ring buffer holds about eight crashes and rolls within ten minutes:
 a signature would get weaker exactly as the fault got worse.
 
 A floor on uptime prevents a reboot loop. The board reboots only if it has been
-up for more than 10 minutes. A board that crash-loops out of boot reaches the
-escalation at roughly five minutes, so that case is blocked with about twice the
-margin it needs. The consequence is deliberate: if the fault returns immediately
-after the reboot, no second reboot happens and the board stays reachable over
-ssh. A leak that refills faster than the floor is a leak a reboot cannot cure.
+up for 10 minutes or more. Five runs of nearly 30 seconds each is the slowest a
+crash loop can reach the escalation: about five minutes, with a 20-second boot
+on top. That is the upper bound, not the case this feature targets. The fault
+it exists for kills the server in under a second, so `ran` quantises to the
+5-second poll interval instead of the 30-second threshold, and the fifth short
+run arrives about 100 seconds after the loop starts. The ten-minute floor
+blocks the slow case with about twice the margin it needs, and the fast case -
+the one that matters - with about six times the margin. The consequence is
+deliberate: if the fault returns immediately after the reboot, no second reboot
+happens and the board stays reachable over ssh. A leak that refills faster than
+the floor is a leak a reboot cannot cure.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |

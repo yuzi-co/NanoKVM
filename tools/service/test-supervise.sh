@@ -242,6 +242,29 @@ cures_case "hung again after one cure"          1 0 1
 cures_case "hung again after two cures"         2 1 2
 
 echo
+echo "===== clearing the counters needs an answer, not just a verdict ====="
+# action() reports healthy for a process that is up and not answering yet,
+# inside HANG_AFTER, and the hang branch resets LAST_OK after every cure - so
+# the very next poll reports healthy too. Clearing on the verdict name alone
+# would wipe the counters between every cure and the hung verdict that should
+# follow it, and the counted hang escalation could never reach its threshold.
+clear_case() {
+    desc="$1"; verdict="$2"; answered="$3"; want="$4"
+    got=$(WORK="$WORK" sh -c ". \"\$WORK/count.sh\"; should_clear $verdict $answered")
+    [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
+}
+
+#          desc                                                 verdict answered want
+clear_case "answering: the fault is over"                       healthy yes      yes
+clear_case "up but not answering yet, inside the grace"         healthy no       no
+clear_case "a deliberate stop, and it was already serving"      stopped yes      yes
+clear_case "a deliberate stop, mid-hang when it was asked to"   stopped no       yes
+clear_case "hung and answered this pass - still mid-cure"       hung    yes      no
+clear_case "hung and silent - stale counts must survive"        hung    no       no
+clear_case "gone and answered this pass - impossible but safe"  restart yes      no
+clear_case "gone and silent"                                    restart no       no
+
+echo
 echo "===== rebooting, and refusing to ====="
 # SUPERVISE_NO_REBOOT exists for the hardware test and for an operator who wants
 # to leave a board in its failed state to investigate it.
@@ -344,15 +367,24 @@ grep -qE 'should_reboot restart' "$SV" \
 grep -qE 'should_reboot hung' "$SV" \
     && note "the hang branch actually asks should_reboot" OK \
     || note "should_reboot is defined but no hang reaches it" FAIL
-grep -qE '^[[:space:]]+escalate ' "$SV" \
-    && note "something actually calls escalate" OK \
-    || note "escalate is defined and never called" FAIL
+# One pattern matching both call sites meant deleting either alone left it
+# green - the other call kept the string in the file. Anchored one per site,
+# the way every other wiring check here is one-to-one with the call it proves.
+grep -qE '^[[:space:]]+escalate "\$hang_reason"$' "$SV" \
+    && note "the hang branch actually calls escalate" OK \
+    || note "escalate is defined but the hang branch never reaches it" FAIL
+grep -qE '^[[:space:]]+escalate "crash loop: ' "$SV" \
+    && note "the restart branch actually calls escalate" OK \
+    || note "escalate is defined but the restart branch never reaches it" FAIL
 grep -qE '^[[:space:]]+short_runs=\$\(next_short_runs ' "$SV" \
     && note "the restart branch actually updates short_runs" OK \
     || note "next_short_runs is defined and never called" FAIL
 grep -qE '^[[:space:]]+failed_cures=\$\(next_failed_cures ' "$SV" \
     && note "the hang branch actually updates failed_cures" OK \
     || note "next_failed_cures is defined and never called" FAIL
+grep -qE '^[[:space:]]+if \[ "\$\(should_clear ' "$SV" \
+    && note "the loop actually asks should_clear before wiping the counters" OK \
+    || note "should_clear is defined and never called" FAIL
 
 echo
 if [ "$fails" -eq 0 ]; then

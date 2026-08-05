@@ -192,6 +192,33 @@ next_failed_cures() {   # $1 = cures attempted so far, $2 = current count
         echo "$2"
     fi
 }
+
+# `healthy` is not the same as "the server answered". action() also returns
+# healthy for a process that is up and not answering yet, inside HANG_AFTER,
+# and the hang branch resets LAST_OK after every cure - so the very next poll
+# reports healthy. Clearing on the verdict alone wipes the counters between
+# every cure and its next hung verdict, and the counted hang escalation can
+# then never reach its threshold. Only an answer clears them.
+#
+# A deliberate stop clears them too. The operator ended the fault, and stale
+# cure counts must not shorten the road to a reboot when the server comes back.
+should_clear() {   # $1 = verdict, $2 = did the probe answer this pass, yes or no
+    case "$1" in
+        healthy)
+            if [ "$2" = yes ]; then
+                echo yes
+            else
+                echo no
+            fi
+            ;;
+        stopped)
+            echo yes
+            ;;
+        *)
+            echo no
+            ;;
+    esac
+}
 # --- end count ---
 
 # --- cure ---
@@ -388,18 +415,29 @@ watch_loop() {
     short_runs=0
     failed_cures=0
     cures=0
+    served=no
 
     while :; do
         sleep "$INTERVAL"
 
-        serving && LAST_OK=$(now)
+        if serving; then
+            LAST_OK=$(now)
+            served=yes
+        else
+            served=no
+        fi
 
-        case "$(action)" in
+        state=$(action)
+
+        if [ "$(should_clear "$state" "$served")" = yes ]; then
+            short_runs=0
+            failed_cures=0
+            cures=0
+        fi
+
+        case "$state" in
             healthy)
                 started=$(now)
-                short_runs=0
-                failed_cures=0
-                cures=0
                 ;;
 
             hung)
@@ -410,15 +448,17 @@ watch_loop() {
 
                 if cure_hung; then
                     cures=$(( cures + 1 ))
+                    hang_reason="hung: $failed_cures cures did not restore service"
                 else
                     # SIGKILL cannot clear uninterruptible sleep, and no later
                     # cure does better. Go straight to the threshold.
                     log "the process did not leave after SIGKILL"
                     failed_cures=${HANG_CURES_K:-2}
+                    hang_reason="hung: the process did not leave after SIGKILL"
                 fi
 
                 if [ "$(should_reboot hung 0 "$failed_cures" "$(now)")" = yes ]; then
-                    escalate "hung: $failed_cures cures did not restore service"
+                    escalate "$hang_reason"
                 fi
 
                 # Give it room to come up before judging again, or a slow start

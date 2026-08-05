@@ -43,10 +43,17 @@ var (
 		"/etc/init.d/S03usbdev start",
 	}
 
+	// The network has two markers - usb.ncm and usb.rndis0 - because S03usbdev
+	// prefers NCM and falls back to RNDIS. Clearing only one leaves the other
+	// on disk, and the function comes straight back at the next boot. Both
+	// config symlinks are removed the same way: whichever one did not bind is
+	// simply absent, and `rm -rf` does not error on a path that is not there.
 	unmountNetworkCommands = []string{
 		"/etc/init.d/S03usbdev stop",
+		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/ncm.usb0",
 		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/rndis.usb0",
-		"rm /boot/usb.rndis0",
+		"rm -f /boot/usb.ncm",
+		"rm -f /boot/usb.rndis0",
 		"/etc/init.d/S03usbdev start",
 	}
 
@@ -79,6 +86,23 @@ var (
 		"/etc/init.d/S03usbdev start",
 	}
 )
+
+// enabledForToggle decides whether a device is already on, for the purpose of
+// picking mount or unmount. It goes through functionForDevice and checks every
+// marker the function declares, not just the single marker its own mount
+// command creates.
+//
+// The network has two markers - usb.ncm and usb.rndis0 - and commandsFor's
+// device name still resolves to whichever one the API device name's own mount
+// command touches (usb.rndis0). A board enabled through the other marker alone
+// would check that single marker as false, take the mount branch, touch
+// usb.rndis0, and restart the gadget with the network already on: it stays on,
+// and a stray second marker is left behind. Checking every marker through the
+// function's enabled method is what keeps that from happening.
+func enabledForToggle(device string, present func(string) bool) bool {
+	function, ok := functionForDevice(device)
+	return ok && function.enabled(present)
+}
 
 // commandsFor maps a device name onto its marker and the two command lists.
 // It exists so that the mapping can be tested without running anything.
@@ -151,7 +175,7 @@ func (s *Service) UpdateVirtualDevice(c *gin.Context) {
 	}
 
 	commands := mount
-	if present(device) {
+	if enabledForToggle(req.Device, present) {
 		// Turning a function off always fits, so it is never checked.
 		commands = unmount
 	} else if ok, free, relief := canEnable(req.Device, present); !ok {

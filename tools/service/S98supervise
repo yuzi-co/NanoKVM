@@ -130,14 +130,35 @@ action() {
 # narrow the fix to the instance that happened to be caught. The signature is
 # still captured afterwards, as evidence rather than as a gate.
 #
-# The guard against a reboot loop is uptime, not a counter, because that follows
-# the physics: a leak that refills faster than the floor is a leak a reboot
-# cannot cure, so this refuses to try. It also keeps the property the rest of
-# this script has - telling one state from another needs no new state on disk.
+# Two guards stand between this and a reboot loop, and they do different jobs.
+#
+# The latch is the one that prevents a cycle. A floor on uptime only sets its
+# period: a fault that is present from boot keeps producing restart or hung
+# verdicts while the floor blocks them, the counters do not survive a reboot,
+# and the moment uptime crosses the floor the same sequence escalates again -
+# every ten and a half minutes, for as long as the board has power. A reboot
+# cures a board that worked and then broke. It is never a cure for a server that
+# has not answered once since this boot, and this board has several faults with
+# exactly that shape: `proto: https` with an unreadable certificate, a build that
+# skipped patchelf, a copy that ran out of space on the SD card. Each leaves the
+# binary staged and executable, so the verdict is restart rather than stopped,
+# and each survives a reboot unchanged.
+#
+# The floor is still worth having on top of it. A board that serves, breaks and
+# is rebooted can serve again briefly before the fault returns, and the floor is
+# what keeps that from becoming a fast cycle. It also follows the physics: a leak
+# that refills faster than the floor is a leak a reboot cannot cure, so this
+# refuses to try. Neither guard needs state on disk, which keeps the property the
+# rest of this script has - telling one state from another needs no new file.
 #
 # Every input is passed in. Nothing here reads a clock, a file or a process.
 should_reboot() {
-    verdict=$1; short_runs=$2; failed_cures=$3; up=$4
+    verdict=$1; short_runs=$2; failed_cures=$3; up=$4; served_ever=$5
+
+    if [ "$served_ever" != yes ]; then
+        echo no
+        return
+    fi
 
     if [ "$up" -lt "${REBOOT_FLOOR:-600}" ]; then
         echo no
@@ -417,12 +438,18 @@ watch_loop() {
     cures=0
     served=no
 
+    # A latch, not a counter. Nothing clears it, because it answers a question
+    # about this boot rather than about this fault: did the server ever work
+    # here? A reboot can only help a board where the answer is yes.
+    served_ever=no
+
     while :; do
         sleep "$INTERVAL"
 
         if serving; then
             LAST_OK=$(now)
             served=yes
+            served_ever=yes
         else
             served=no
         fi
@@ -457,7 +484,7 @@ watch_loop() {
                     hang_reason="hung: the process did not leave after SIGKILL"
                 fi
 
-                if [ "$(should_reboot hung 0 "$failed_cures" "$(now)")" = yes ]; then
+                if [ "$(should_reboot hung 0 "$failed_cures" "$(now)" "$served_ever")" = yes ]; then
                     escalate "$hang_reason"
                 fi
 
@@ -475,7 +502,7 @@ watch_loop() {
                 short_runs=$(next_short_runs "$ran" "$short_runs")
                 log "NanoKVM-Server is gone after ${ran}s, restarting in ${delay}s"
 
-                if [ "$(should_reboot restart "$short_runs" 0 "$(now)")" = yes ]; then
+                if [ "$(should_reboot restart "$short_runs" 0 "$(now)" "$served_ever")" = yes ]; then
                     escalate "crash loop: $short_runs runs shorter than ${SHORT_RUN:-30}s"
                 fi
 

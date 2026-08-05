@@ -40,12 +40,14 @@ export const VirtualDevices = () => {
       const rsp = await api.getVirtualDevice();
       if (rsp.code !== 0) {
         console.log(rsp.msg);
+        setRefusal(t('settings.device.endpoints.error'));
         return;
       }
 
       setDevices(rsp.data);
     } catch (err) {
       console.log(err);
+      setRefusal(t('settings.device.endpoints.error'));
     }
   }
 
@@ -66,6 +68,10 @@ export const VirtualDevices = () => {
       await getVirtualDevice();
     } catch (err) {
       console.log(err);
+      // Toggling restarts the USB gadget, so a request can go missing while
+      // it rebuilds. Say so, rather than leaving the switch snap back with
+      // no explanation.
+      setRefusal(t('settings.device.endpoints.error'));
     } finally {
       setLoading('');
     }
@@ -110,19 +116,26 @@ export const VirtualDevices = () => {
         </div>
 
         <div className="flex items-center space-x-3">
-          <span className="text-xs text-neutral-500">
+          <span id={`endpoint-cost-${device}`} className="text-xs text-neutral-500">
             {state.enabled
               ? t('settings.device.endpoints.cost', { cost: state.cost })
               : t('settings.device.endpoints.needs', { cost: state.cost, free })}
           </span>
 
+          {/* antd clones the Tooltip child directly, and a disabled native
+              <button> suppresses mouse events, so the tooltip on the Switch
+              itself would never open. Wrapping it in a span that stays
+              enabled gives the Tooltip a target that still receives hover. */}
           <Tooltip title={fits ? '' : t('settings.device.endpoints.full')}>
-            <Switch
-              checked={state.enabled}
-              disabled={!fits}
-              loading={loading === device}
-              onChange={() => update(device)}
-            />
+            <span className="inline-block">
+              <Switch
+                checked={state.enabled}
+                disabled={!fits}
+                loading={loading === device}
+                onChange={() => update(device)}
+                aria-describedby={`endpoint-cost-${device}`}
+              />
+            </span>
           </Tooltip>
         </div>
       </div>

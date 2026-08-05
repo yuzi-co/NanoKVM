@@ -207,6 +207,81 @@ cure_hung() {
 }
 # --- end cure ---
 
+# --- act ---
+# /tmp does not survive a reboot, and the kernel ring buffer holds about eight
+# crashes and rolls within ten minutes. Evidence not taken here is gone, and the
+# 2026-08-04 incident was diagnosable only because a copy was made by hand
+# before the board was restarted.
+#
+# prune_reboot_dirs takes the directory it is standing in, so capture_evidence
+# calls it after cd-ing there. busybox head is not assumed to accept a negative
+# count, so the count is computed and a positive one is passed.
+prune_reboot_dirs() {
+    n=$(ls -d reboot-* 2>/dev/null | wc -l)
+    [ "$n" -le 3 ] && return 0
+
+    ls -d reboot-* 2>/dev/null | sort | head -n $(( n - 3 )) | while read -r d
+    do
+        rm -rf "$d"
+    done
+    return 0
+}
+
+# Never touch the VB pool debugfs entry. It blocks forever in uninterruptible
+# sleep and the reader cannot be killed, so a capture that touched it would mean
+# the board never reboots at all.
+capture_evidence() {   # $1 = reason
+    dir="/data/kvm-diag/reboot-$(date '+%Y%m%d-%H%M%S')"
+    mkdir -p "$dir" || return 0
+
+    echo "$1"                                                > "$dir/reason"
+    dmesg                                                    > "$dir/dmesg"         2>/dev/null
+    tail -c 65536 "$SERVER_LOG"                              > "$dir/server.log"    2>/dev/null
+    tail -c 16384 "$LOG"                                     > "$dir/supervise.log" 2>/dev/null
+    cat /proc/uptime /proc/meminfo                           > "$dir/proc"          2>/dev/null
+    cat /sys/kernel/debug/ion/cvi_carveout_heap_dump/summary > "$dir/ion"           2>/dev/null
+
+    cd /data/kvm-diag 2>/dev/null && prune_reboot_dirs
+    return 0
+}
+
+# Evidence is worth having. Uptime outranks it, so the capture runs detached
+# with a bounded wait and is abandoned if it does not finish.
+capture_bounded() {   # $1 = reason
+    echo "captured"
+    capture_evidence "$1" &
+    pid=$!
+
+    i=0
+    while [ "$i" -lt 10 ]
+    do
+        kill -0 "$pid" 2>/dev/null || return 0
+        i=$(( i + 1 ))
+        sleep 1
+    done
+
+    log "the evidence capture did not finish, rebooting without it"
+    kill -9 "$pid" 2>/dev/null
+    return 0
+}
+
+escalate() {   # $1 = reason
+    if [ "${NO_REBOOT:-0}" = 1 ]; then
+        log "would reboot ($1), but SUPERVISE_NO_REBOOT is set"
+        return 0
+    fi
+
+    log "rebooting: $1"
+    capture_bounded "$1"
+    sync
+    reboot
+
+    # reboot returns immediately. Stop deciding while the board goes down, or
+    # the loop keeps counting against a system that is already leaving.
+    sleep 120
+}
+# --- end act ---
+
 # --- backoff ---
 # A binary that can never start must not be retried in a tight loop: this board
 # has one core and an SD card. It must also never be given up on, because it is

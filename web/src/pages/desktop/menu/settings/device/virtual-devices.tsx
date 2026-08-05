@@ -119,7 +119,7 @@ export const VirtualDevices = () => {
           <span id={`endpoint-cost-${device}`} className="text-xs text-neutral-500">
             {state.enabled
               ? t('settings.device.endpoints.cost', { cost: state.cost })
-              : t('settings.device.endpoints.needs', { cost: state.cost, free })}
+              : t('settings.device.endpoints.needs', { cost: state.cost })}
           </span>
 
           {/* antd clones the Tooltip child directly, and a disabled native

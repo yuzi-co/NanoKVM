@@ -106,8 +106,46 @@ func TestShellAndGoAgreeOnTheDropOrder(t *testing.T) {
 	}
 }
 
-// HID's share is the largest single number in the budget and it is spelled in
-// both copies.
+// usb_resolve - the function that actually decides what gets built at boot -
+// reads usb_keep_order, not usb_drop_order. dropOrder() is otherwise used
+// only by tests, so pinning just the drop order leaves the order that decides
+// boot behaviour checked only transitively, through
+// tools/service/test-usb-endpoints.sh asserting that the keep order and the
+// drop order are each other's reverse. This test pins usb_keep_order directly
+// against the Go table - highest priority first, the reverse of dropOrder() -
+// so drift in the boot-critical order is caught here even if that other
+// script is ever deleted.
+func TestShellAndGoAgreeOnTheKeepOrder(t *testing.T) {
+	script := readInitScript(t)
+
+	order := regexp.MustCompile(`usb_keep_order\(\) \{\s*echo "([^"]+)"`).FindStringSubmatch(script)
+	if order == nil {
+		t.Fatal("S03usbdev has no usb_keep_order function")
+	}
+
+	shell := strings.Fields(order[1])
+
+	drop := dropOrder()
+	goOrder := make([]string, len(drop))
+	for i, function := range drop {
+		goOrder[len(drop)-1-i] = function.name
+	}
+
+	if !reflect.DeepEqual(shell, goOrder) {
+		t.Errorf("S03usbdev keeps %v, Go's dropOrder() reversed keeps %v", shell, goOrder)
+	}
+}
+
+// usb_hid_cost has two arms and only one of them is hidCost: the disable_hid
+// arm must charge nothing, and the other arm must charge exactly hidCost. A
+// substring search over the whole function body would stay green if the two
+// arms were swapped - HID would then cost nothing while still being built,
+// the guard would approve 9 endpoints of optional functions on top of the 3
+// HID actually uses, the gadget would ask for 12 against a budget of 9, and
+// every /dev/hidg* would disappear along with everything else.
+var hidCostShape = regexp.MustCompile(
+	`(?s)if\s+usb_marker\s+disable_hid\s*\n\s*then\s*\n\s*echo\s+(\d+)\s*\n\s*else\s*\n\s*echo\s+(\d+)`)
+
 func TestShellAndGoAgreeOnWhatHidCosts(t *testing.T) {
 	script := readInitScript(t)
 
@@ -117,10 +155,33 @@ func TestShellAndGoAgreeOnWhatHidCosts(t *testing.T) {
 	}
 
 	end := strings.Index(script[start:], "\n}")
+	if end < 0 {
+		t.Fatal("usb_hid_cost is not terminated")
+	}
+
 	body := script[start : start+end]
 
-	if !strings.Contains(body, strconv.Itoa(hidCost)) {
-		t.Errorf("usb_hid_cost does not mention %d, which is hidCost in Go", hidCost)
+	arms := hidCostShape.FindStringSubmatch(body)
+	if arms == nil {
+		t.Fatalf("usb_hid_cost does not have the if usb_marker disable_hid / then / else shape this test parses:\n%s", body)
+	}
+
+	disabled, err := strconv.Atoi(arms[1])
+	if err != nil {
+		t.Fatalf("usb_hid_cost's disable_hid arm echoes %q, which is not a number", arms[1])
+	}
+
+	built, err := strconv.Atoi(arms[2])
+	if err != nil {
+		t.Fatalf("usb_hid_cost's else arm echoes %q, which is not a number", arms[2])
+	}
+
+	if disabled != 0 {
+		t.Errorf("usb_hid_cost charges %d when disable_hid is present, want 0", disabled)
+	}
+
+	if built != hidCost {
+		t.Errorf("usb_hid_cost charges %d when HID is built, Go's hidCost is %d", built, hidCost)
 	}
 }
 
@@ -158,6 +219,9 @@ func TestTheShellBudgetIsNotReadFromDmesg(t *testing.T) {
 	}
 
 	end := strings.Index(script[start:], "\n}")
+	if end < 0 {
+		t.Fatal("usb_budget is not terminated")
+	}
 
 	if strings.Contains(script[start:start+end], "dmesg") {
 		t.Error("usb_budget consults dmesg, which reports 8 while 9 endpoints bind")

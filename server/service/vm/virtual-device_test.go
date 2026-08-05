@@ -138,6 +138,52 @@ func TestCommandsForNetworkUnmountClearsBothMarkers(t *testing.T) {
 	}
 }
 
+// UpdateVirtualDevice runs the command list in order and returns at the first
+// nonzero exit. Every unmount list removes its marker between `S03usbdev stop`
+// and `S03usbdev start`, so a marker removal that fails skips the start: the
+// gadget stays unbound, the managed host loses the keyboard and both mice, and
+// the web UI offers nothing that would bring it back. /boot is vfat on the SD
+// card and does turn read-only after an error, so this is a real path and not a
+// theoretical one. Every marker removal takes -f.
+func TestEveryUnmountRemovesItsMarkersWithForce(t *testing.T) {
+	for _, function := range usbFunctions {
+		_, _, unmount, ok := commandsFor(function.device)
+		if !ok {
+			t.Errorf("commandsFor rejected %q", function.device)
+			continue
+		}
+
+		for _, marker := range function.markers {
+			var found bool
+
+			for _, command := range unmount {
+				fields := strings.Fields(command)
+				if len(fields) < 2 || fields[0] != "rm" || fields[len(fields)-1] != marker {
+					continue
+				}
+
+				found = true
+
+				var forced bool
+				for _, flag := range fields[1 : len(fields)-1] {
+					if strings.HasPrefix(flag, "-") && strings.Contains(flag, "f") {
+						forced = true
+					}
+				}
+
+				if !forced {
+					t.Errorf("%s unmount removes %s with %q, which is not forced: a read-only /boot aborts the list and never runs S03usbdev start",
+						function.device, marker, command)
+				}
+			}
+
+			if !found {
+				t.Errorf("%s unmount commands %v never remove %s", function.device, unmount, marker)
+			}
+		}
+	}
+}
+
 // enabledForToggle is what UpdateVirtualDevice asks before picking mount or
 // unmount. It has to recognise a board enabled through either of the
 // network's two markers, not just the one its own mount command creates.

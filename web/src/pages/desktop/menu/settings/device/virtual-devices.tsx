@@ -156,11 +156,15 @@ export const VirtualDevices = () => {
             </span>
           </div>
 
+          {/* free goes negative on a board that carries more markers than the
+              controller fits, and that is precisely the board the warning is
+              for. Comparing against 0 exactly left the bar its default colour
+              there, at a percent antd clamps to 100. */}
           <Progress
             percent={(devices.used / devices.total) * 100}
             showInfo={false}
             size="small"
-            strokeColor={free === 0 ? '#f59e0b' : undefined}
+            strokeColor={free <= 0 ? '#f59e0b' : undefined}
           />
 
           <span className="text-xs text-neutral-500">{t('settings.device.endpoints.explain')}</span>

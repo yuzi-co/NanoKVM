@@ -69,6 +69,7 @@ func (s *SignalingHandler) updateVideoStreamState(state webrtc.ICEConnectionStat
 	if s.updateH264ModeLocked(state) {
 		manager.AddClient(s.client.WsConn(), s.client)
 		manager.StartVideoStream()
+		manager.StartAudioStream()
 		return
 	}
 

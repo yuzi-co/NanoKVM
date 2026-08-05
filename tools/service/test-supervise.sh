@@ -295,8 +295,15 @@ clear_case() {
 #          desc                                                 verdict answered want
 clear_case "answering: the fault is over"                       healthy yes      yes
 clear_case "up but not answering yet, inside the grace"         healthy no       no
-clear_case "a deliberate stop, and it was already serving"      stopped yes      yes
-clear_case "a deliberate stop, mid-hang when it was asked to"   stopped no       yes
+# The supervisor's own cure is S95nanokvm restart, which removes /tmp/server and
+# copies 36MB back. For that whole window there is no process and no binary, so
+# the verdict is the one a deliberate stop gives - and clearing there wipes the
+# cure counters on exactly the slow SD card the fault arrives with. Measured: a
+# 20-second re-stage escalated on the third hung verdict, a 40-second re-stage
+# never escalated at all. An operator who stops the server and brings it back
+# produces an answering healthy poll, which clears the counters safely.
+clear_case "mid-cure, while S95nanokvm re-stages /tmp"          stopped no       no
+clear_case "stopped but something answered - not a cure signal" stopped yes      no
 clear_case "hung and answered this pass - still mid-cure"       hung    yes      no
 clear_case "hung and silent - stale counts must survive"        hung    no       no
 clear_case "gone and answered this pass - impossible but safe"  restart yes      no

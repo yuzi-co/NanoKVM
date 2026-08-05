@@ -16,10 +16,12 @@ sed -n '/^# --- decide ---$/,/^# --- end decide ---$/p'   "$SV" > "$WORK/decide.
 sed -n '/^# --- backoff ---$/,/^# --- end backoff ---$/p' "$SV" > "$WORK/backoff.sh"
 sed -n '/^# --- cure ---$/,/^# --- end cure ---$/p'       "$SV" > "$WORK/cure.sh"
 sed -n '/^# --- escalate ---$/,/^# --- end escalate ---$/p' "$SV" > "$WORK/escalate.sh"
+sed -n '/^# --- count ---$/,/^# --- end count ---$/p' "$SV" > "$WORK/count.sh"
 [ -s "$WORK/decide.sh" ]  || { echo "could not extract the decide block"; exit 1; }
 [ -s "$WORK/backoff.sh" ] || { echo "could not extract the backoff block"; exit 1; }
 [ -s "$WORK/cure.sh" ]    || { echo "could not extract the cure block"; exit 1; }
 [ -s "$WORK/escalate.sh" ] || { echo "could not extract the escalate block"; exit 1; }
+[ -s "$WORK/count.sh" ] || { echo "could not extract the count block"; exit 1; }
 
 fails=0
 note() { printf '  %-60s %s\n' "$1" "$2"; [ "$2" = FAIL ] && fails=$((fails + 1)); return 0; }
@@ -189,6 +191,39 @@ escalate_case "hang one second under the floor"                hung    0  2  599
 escalate_case "hang straight out of boot"                      hung    0  9  0    no
 escalate_case "crash loop exactly at the floor"                restart 5  0  600  yes
 escalate_case "hang exactly at the floor"                      hung    0  2  600  yes
+
+echo
+echo "===== counting the runs that did not last ====="
+# The threshold is 30s and not the one second the process actually survives.
+# watch_loop sleeps INTERVAL between checks and resets `started` after each
+# start, so `ran` is quantised to the poll and never reports below about five
+# seconds. A five-second threshold would be an assertion that can never be true.
+short_case() {
+    desc="$1"; ran="$2"; current="$3"; want="$4"
+    got=$(WORK="$WORK" sh -c ". \"\$WORK/count.sh\"; next_short_runs $ran $current")
+    [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
+}
+
+short_case "died as soon as it started"        1   0 1
+short_case "died at the poll interval"         5   0 1
+short_case "just under the threshold"          29  2 3
+short_case "exactly at the threshold, so reset" 30 4 0
+short_case "a run that lasted, so reset"       300 4 0
+
+echo
+echo "===== counting the cures that did not work ====="
+# A hung verdict that arrives after a cure proves that cure did not work. The
+# first hung verdict of a fault follows no cure at all, so it counts nothing -
+# otherwise the very first hang would be one step from a reboot.
+cures_case() {
+    desc="$1"; cures="$2"; current="$3"; want="$4"
+    got=$(WORK="$WORK" sh -c ". \"\$WORK/count.sh\"; next_failed_cures $cures $current")
+    [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
+}
+
+cures_case "the first hang, nothing tried yet"  0 0 0
+cures_case "hung again after one cure"          1 0 1
+cures_case "hung again after two cures"         2 1 2
 
 echo
 echo "===== the script still parses ====="

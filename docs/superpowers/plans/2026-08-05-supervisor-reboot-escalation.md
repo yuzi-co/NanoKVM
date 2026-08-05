@@ -1074,11 +1074,65 @@ every case stayed green, and nothing about that trap is specific to it."
 - Consumes: the whole feature.
 - Produces: evidence that it works on the device, recorded in the ledger.
 
-Run this on the real board. The unit tests assert strings and pure functions; only the device shows that the loop reaches them, that `reboot` works from inside a detached `setsid` session, and — most importantly — that the floor holds.
+Run this on the real board. The unit tests assert strings and pure functions; only the device shows that the loop reaches them, that `reboot` works from inside a detached `setsid` session, and — most importantly — that the floor and the latch hold.
 
 Back up first. `/etc/init.d/S98supervise` and the real `/tmp/server/NanoKVM-Server` both have to come back.
 
-- [ ] **Step 1: Back up and install**
+**Two properties shape every step below, and both were review findings.**
+
+The escalation cannot fire unless the probe has answered at least once since the
+supervisor started. `served_ever` is a per-boot latch and the first thing
+`should_reboot` checks, because a reboot cures a board that worked and then
+broke and never cures a server that has not answered once. So a stub staged
+*before* `start` produces no escalation at all: the correct injection is to start
+the supervisor against the healthy server, let it answer one poll, and stage the
+stub after that. That is also a truer reproduction of 2026-08-04, where the board
+served for thirty hours first.
+
+Truncating a running executable fails with `ETXTBSY`, so every stub is written
+elsewhere and moved into place. `rename` over a busy binary is allowed.
+
+**The fault injection.** Steps 7, 8 and 9 all use this, and each one is preceded
+by a saved copy of the real binary:
+
+```shell
+ssh root@10.0.0.222 '
+    printf "#!/bin/sh\nexit 1\n" > /tmp/stub && chmod 755 /tmp/stub
+    mv /tmp/stub /tmp/server/NanoKVM-Server
+    killall -9 NanoKVM-Server
+'
+```
+
+**The restore between them.** The supervisor starts the real binary again within
+its backoff delay, and the poll that answers is what sets the latch for the next
+injection:
+
+```shell
+ssh root@10.0.0.222 '
+    cp /data/NanoKVM-Server.real /tmp/stub && chmod 755 /tmp/stub
+    mv /tmp/stub /tmp/server/NanoKVM-Server
+'
+sleep 30
+ssh root@10.0.0.222 '/etc/init.d/S98supervise status'
+```
+
+Expected: `answering : yes` before any step stages the stub again.
+
+- [ ] **Step 1: Check the device has what the feature needs**
+
+```shell
+ssh root@10.0.0.222 'command -v curl && curl --version | head -1'
+```
+
+Expected: a path and a version line.
+
+`serving()` returns 0 when `curl` is missing — never reboot or restart a KVM
+because a probe broke. The consequence is that on a board without `curl` every
+poll reports the server as answering, `action` can never return `hung`, and the
+whole hang half of this feature is inert. The crash half still works. If this
+step finds no `curl`, record it and skip steps 5 and 6.
+
+- [ ] **Step 2: Back up and install**
 
 ```shell
 ssh root@10.0.0.222 'cp /etc/init.d/S98supervise /data/S98supervise.before'
@@ -1088,7 +1142,7 @@ ssh root@10.0.0.222 'chmod 755 /etc/init.d/S98supervise && sh -n /etc/init.d/S98
 
 Expected: `parses`.
 
-- [ ] **Step 2: Run the suite on the device**
+- [ ] **Step 3: Run the suite on the device**
 
 ```shell
 scp tools/service/test-supervise.sh tools/service/test-supervise-mutation.sh root@10.0.0.222:/tmp/
@@ -1098,68 +1152,210 @@ ssh root@10.0.0.222 'sh /tmp/test-supervise-mutation.sh /etc/init.d/S98supervise
 
 Expected: both PASS against the installed copy, under the device's own `ash`.
 
-- [ ] **Step 3: Prove `SUPERVISE_NO_REBOOT=1` disables it**
+- [ ] **Step 4: Save the real binary**
 
-Save the real binary, put a stub in its place, and run the supervisor with the floor lowered so the escalation is reachable:
+```shell
+ssh root@10.0.0.222 'cp /tmp/server/NanoKVM-Server /data/NanoKVM-Server.real && ls -l /data/NanoKVM-Server.real'
+```
+
+`/data` survives a reboot, and steps 7 to 9 each reboot the board. Nothing below
+may run until this file exists.
+
+- [ ] **Step 5: Drive the hang path end to end, with no stub and no reboot**
+
+Nothing else in this plan produces a `hung` verdict on hardware, and the hang
+path carries four things no unit test reaches: `should_clear` across the real
+`S95nanokvm` re-stage window, the `cures` counter, `wait_gone`'s return value,
+and the 36MB copy that makes the verdict read `stopped` for about half a minute
+in the middle of the cure. Two of those have already produced defects.
+
+It needs no stub. Point the probe at a port nothing listens on. `serving` then
+always fails while `NanoKVM-Server` is up and healthy, so `action` returns `hung`
+and the whole path runs — against a KVM that keeps answering on port 80 the
+entire time.
 
 ```shell
 ssh root@10.0.0.222 '
-    cp /tmp/server/NanoKVM-Server /data/NanoKVM-Server.real
     /etc/init.d/S98supervise stop
-    printf "#!/bin/sh\nexit 1\n" > /tmp/server/NanoKVM-Server
-    chmod 755 /tmp/server/NanoKVM-Server
-    killall -9 NanoKVM-Server 2>/dev/null
-    SUPERVISE_NO_REBOOT=1 SUPERVISE_REBOOT_FLOOR=0 SUPERVISE_INTERVAL=2 \
+    SUPERVISE_URL=http://127.0.0.1:1/ SUPERVISE_INTERVAL=5 SUPERVISE_NO_REBOOT=1 \
         /etc/init.d/S98supervise start
 '
 ```
 
-Wait about four minutes, then:
+Each cure costs about 90 seconds — `HANG_AFTER` is 60 and the hang branch sleeps
+30 afterwards. Wait about six minutes, then:
 
 ```shell
-ssh root@10.0.0.222 'grep "would reboot" /data/supervise.log | tail -3; cut -d. -f1 /proc/uptime'
+ssh root@10.0.0.222 'grep -E "has not answered|did not leave|would reboot" /data/supervise.log | tail -10'
 ```
 
-Expected: `would reboot (crash loop: 5 runs shorter than 30s), but SUPERVISE_NO_REBOOT is set`, and an uptime that shows the board did not restart. The SSH session staying alive is itself the evidence.
+Expected: three or more `killing and restarting it` lines whose `failed_cures=`
+value climbs 0, 1, 2, 3, and **no** `would reboot` line. The climbing count is
+the evidence: it can only climb if the counters survived the window where
+`S95nanokvm` had removed `/tmp/server` and the verdict was `stopped`. The absent
+`would reboot` line is the latch — this probe never answered, so no reboot is
+available on this run at any uptime.
 
-- [ ] **Step 4: Prove the floor blocks a reboot**
+Then put the probe back:
 
-This is the safety property. It must be proven, not assumed.
+```shell
+ssh root@10.0.0.222 '/etc/init.d/S98supervise stop; /etc/init.d/S98supervise start; sleep 10; /etc/init.d/S98supervise status'
+```
+
+Expected: `answering : yes`.
+
+- [ ] **Step 6: Make the hang path escalate, and then reboot**
+
+The escalation needs one answered poll. A listener that answers exactly once
+gives the latch and then leaves, so every later poll fails:
+
+```shell
+ssh root@10.0.0.222 'nc --help 2>&1 | grep -q -- "-l" && echo "nc can listen"'
+```
+
+If `nc` cannot listen, record this step as not run. Part of it — the counters and
+the cure loop — is already proven by step 5, and the decision itself is covered
+by the unit suite.
+
+```shell
+ssh root@10.0.0.222 '
+    /etc/init.d/S98supervise stop
+    (printf "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n" | nc -l -p 8099 >/dev/null 2>&1 &)
+    sleep 1
+    SUPERVISE_URL=http://127.0.0.1:8099/ SUPERVISE_INTERVAL=5 SUPERVISE_NO_REBOOT=1 \
+        /etc/init.d/S98supervise start
+'
+```
+
+Wait about six minutes, then:
+
+```shell
+ssh root@10.0.0.222 'grep -E "has not answered|would reboot" /data/supervise.log | tail -6'
+```
+
+Expected: three `killing and restarting it` lines and then `would reboot (hung: 2
+cures did not restore service), but SUPERVISE_NO_REBOOT is set`. The escalation
+lands on the third hung verdict, because the first follows no cure at all.
+
+Now run the same thing without the switch, and let the board reboot:
+
+```shell
+ssh root@10.0.0.222 '
+    /etc/init.d/S98supervise stop
+    (printf "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n" | nc -l -p 8099 >/dev/null 2>&1 &)
+    sleep 1
+    SUPERVISE_URL=http://127.0.0.1:8099/ SUPERVISE_INTERVAL=5 /etc/init.d/S98supervise start
+'
+```
+
+Expected: the board reboots within about six minutes. Poll until it answers, then
+confirm on the new boot rather than on a sample taken before it went down:
+
+```shell
+ssh root@10.0.0.222 'cut -d. -f1 /proc/uptime; cat /data/kvm-diag/reboot-*/reason'
+```
+
+Expected: a small uptime, and a reason reading `hung: 2 cures did not restore
+service`. Nothing was staged, so the board comes back healthy on its own.
+
+- [ ] **Step 7: Prove the crash-loop escalation fires, with the shipped defaults**
+
+No threshold override except the poll interval. A run that proves the feature
+with `SUPERVISE_REBOOT_FLOOR=0` proves something that does not ship. The board's
+uptime is well past 600 by now, so the floor is satisfied honestly.
 
 ```shell
 ssh root@10.0.0.222 '
     /etc/init.d/S98supervise stop
     SUPERVISE_INTERVAL=2 /etc/init.d/S98supervise start
+    sleep 10
+    /etc/init.d/S98supervise status
 '
 ```
 
-The stub is still in place and the floor is now at its default 600. Wait about four minutes, then:
-
-```shell
-ssh root@10.0.0.222 'tail -20 /data/supervise.log; cut -d. -f1 /proc/uptime; ls /data/kvm-diag/'
-```
-
-Expected: repeated `NanoKVM-Server is gone after Ns` lines and **no** `rebooting:` line, provided `/proc/uptime` is still under 600. No `reboot-*` directory exists. If the board's uptime is already past 600 seconds, reboot it first and repeat this step within ten minutes of boot — the point of the test is the uptime, not the elapsed wall clock.
-
-- [ ] **Step 5: Prove the escalation fires**
-
-```shell
-ssh root@10.0.0.222 '
-    /etc/init.d/S98supervise stop
-    SUPERVISE_REBOOT_FLOOR=0 SUPERVISE_INTERVAL=2 /etc/init.d/S98supervise start
-'
-```
-
-Expected: the board reboots within about four minutes. Poll until it answers again, then confirm on the real boot rather than on a sample taken before it went down:
+Expected: `answering : yes` — this is the poll that sets the latch. Now stage the
+stub with the fault injection above, and expect the board to reboot within about
+three minutes. Poll until it answers again, then:
 
 ```shell
 ssh root@10.0.0.222 'cut -d. -f1 /proc/uptime; ls -d /data/kvm-diag/reboot-*; \
     cat /data/kvm-diag/reboot-*/reason; ls /data/kvm-diag/reboot-*/'
 ```
 
-Expected: a small uptime, one `reboot-*` directory, a `reason` reading `crash loop: 5 runs shorter than 30s`, and the files `dmesg`, `server.log`, `supervise.log`, `proc`, `ion` inside it. Check `/proc/uptime` — a poll that returns quickly can be answering from before the reboot.
+Expected: a small uptime, a `reboot-*` directory, a `reason` reading `crash loop:
+5 runs shorter than 30s`, and the files `dmesg`, `server.log`, `supervise.log`,
+`proc`, `ion` inside it. Check `/proc/uptime` — a poll that returns quickly can be
+answering from before the reboot.
 
-- [ ] **Step 6: Restore the board**
+`/tmp` is tmpfs and `S95nanokvm` copies the real binary back at boot, so the stub
+is gone and the board comes up healthy. Steps 8 and 9 stage it again.
+
+- [ ] **Step 8: Prove the floor blocks the same run**
+
+**Run this inside ten minutes of the reboot in step 7.** It is step 9 with one
+variable changed — the floor — and the two together are the only falsifiable form
+of this test. Read the uptime first and abandon the step if it is already near
+600; the point of the test is the uptime, not the elapsed wall clock.
+
+`SUPERVISE_NO_REBOOT=1` is set here as well as in step 9, so the board cannot
+reboot during the step that is meant to prove it does not.
+
+```shell
+ssh root@10.0.0.222 '
+    cut -d. -f1 /proc/uptime
+    /etc/init.d/S98supervise stop
+    SUPERVISE_NO_REBOOT=1 SUPERVISE_INTERVAL=2 /etc/init.d/S98supervise start
+    sleep 10
+    /etc/init.d/S98supervise status
+'
+```
+
+Expected: `answering : yes`. Stage the stub with the fault injection above, wait
+about three minutes, then:
+
+```shell
+ssh root@10.0.0.222 'cut -d. -f1 /proc/uptime; tail -25 /data/supervise.log'
+```
+
+Three assertions, and the first two are the positive control that makes the third
+mean anything:
+
+1. The start line reads `(floor 600s, 5 short runs, 2 cures, no_reboot=1)`.
+2. Repeated `NanoKVM-Server is gone after Ns (short_runs=N)` lines appear, and
+   the count reaches 5 or more. A step that never reached the threshold has
+   proven nothing about the floor.
+3. **No** `would reboot` line and no `rebooting:` line, with `/proc/uptime` still
+   under 600 at the end.
+
+Record both uptime readings. Then restore the real binary as above.
+
+- [ ] **Step 9: The positive control — the same run with the floor at zero**
+
+Identical to step 8 in every respect except `SUPERVISE_REBOOT_FLOOR=0`. If this
+step does not produce the line step 8 must not produce, step 8 proved nothing.
+
+```shell
+ssh root@10.0.0.222 '
+    /etc/init.d/S98supervise stop
+    SUPERVISE_NO_REBOOT=1 SUPERVISE_REBOOT_FLOOR=0 SUPERVISE_INTERVAL=2 \
+        /etc/init.d/S98supervise start
+    sleep 10
+    /etc/init.d/S98supervise status
+'
+```
+
+Expected: `answering : yes`. Stage the stub, wait about three minutes, then:
+
+```shell
+ssh root@10.0.0.222 'grep -E "supervisor started|would reboot" /data/supervise.log | tail -4; cut -d. -f1 /proc/uptime'
+```
+
+Expected: a start line reading `(floor 0s, 5 short runs, 2 cures, no_reboot=1)`,
+followed by `would reboot (crash loop: 5 runs shorter than 30s), but
+SUPERVISE_NO_REBOOT is set`. The uptime shows the board did not restart, and the
+SSH session staying alive is itself the evidence.
+
+- [ ] **Step 10: Restore the board**
 
 ```shell
 ssh root@10.0.0.222 '
@@ -1183,7 +1379,7 @@ ssh root@10.0.0.222 'ls -l /proc/$(pidof NanoKVM-Server)/exe'
 
 Expected: it points at `/tmp/server/NanoKVM-Server`, and the web UI answers.
 
-- [ ] **Step 7: Prove a healthy board is untouched**
+- [ ] **Step 11: Prove a healthy board is untouched**
 
 Leave the supervisor running with the real binary for at least one hour, then:
 
@@ -1191,14 +1387,18 @@ Leave the supervisor running with the real binary for at least one hour, then:
 ssh root@10.0.0.222 'cut -d. -f1 /proc/uptime; ls /data/kvm-diag/ ; tail -5 /data/supervise.log'
 ```
 
-Expected: uptime over 3600, no new `reboot-*` directory, and no new log lines beyond what the supervisor writes today. A guard that fires on a healthy board is worse than no guard.
+Expected: uptime over 3600, no new `reboot-*` directory, and no new log lines
+beyond what the supervisor writes today. A guard that fires on a healthy board is
+worse than no guard.
 
-- [ ] **Step 8: Record the result**
+- [ ] **Step 12: Record the result**
 
-Write the outcome of each of steps 2 to 7 into the plan's ledger, including the uptime readings that prove step 4 and step 5. Then remove the leftovers:
+Write the outcome of each of steps 1 to 11 into the plan's ledger, including the
+`failed_cures` sequence from step 5 and both uptime readings from step 8. Then
+remove the leftovers:
 
 ```shell
-ssh root@10.0.0.222 'rm -f /tmp/test-supervise.sh /tmp/test-supervise-mutation.sh /data/NanoKVM-Server.real'
+ssh root@10.0.0.222 'rm -f /tmp/test-supervise.sh /tmp/test-supervise-mutation.sh /data/NanoKVM-Server.real /tmp/stub'
 ```
 
 Keep `/data/S98supervise.before` until the branch is merged. It is the rollback.

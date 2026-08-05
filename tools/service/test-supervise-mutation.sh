@@ -66,6 +66,11 @@ mutate "the latch is cleared with the counters" 's/^            cures=0$/       
 
 echo
 echo "== the floor, which sets how often a reboot cycle could turn"
+# The next expression also rewrites the assignment at the top of the file,
+# because SUPERVISE_REBOOT_FLOOR:-600 contains the pattern as a substring. It is
+# harmless - that line sits outside every extracted block, and the mutant is
+# transient - but an anchored expression written here will not do what its
+# author expects.
 mutate "the floor is removed"            's/REBOOT_FLOOR:-600/REBOOT_FLOOR:-0/'
 mutate "the floor comparison is inverted" 's/"\$up" -lt/"\$up" -ge/'
 mutate "the floor is off by one"          's/"\$up" -lt/"\$up" -le/'
@@ -98,11 +103,8 @@ mutate "the two hang reasons collapse into one" \
 
 echo
 echo "== the counters"
-# Both of the next two expressions also rewrite the assignment at the top of the
-# file, because SUPERVISE_SHORT_RUN:-30 and SUPERVISE_REBOOT_FLOOR:-600 contain
-# these patterns as substrings. It is harmless - those lines sit outside every
-# extracted block, and the mutant is transient - but an anchored expression
-# written here will not behave the way its author expects.
+# Same substring trap as the floor above: SUPERVISE_SHORT_RUN:-30 ends with this
+# pattern, so the next expression rewrites the top-of-file assignment too.
 mutate "a short run is five seconds again" 's/SHORT_RUN:-30/SHORT_RUN:-5/'
 mutate "the run length is off by one"      's/"\$1" -lt "\${SHORT_RUN/"\$1" -le "\${SHORT_RUN/'
 mutate "a short run does not accumulate"   's/echo \$(( \$2 + 1 ))/echo 1/'

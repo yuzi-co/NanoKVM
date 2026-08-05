@@ -91,7 +91,18 @@ mutate "one failed cure is enough"        's/HANG_CURES_K:-2/HANG_CURES_K:-1/'
 mutate "the cure count is off by one"     's/"\$failed_cures" -ge/"\$failed_cures" -gt/'
 
 echo
+echo "== what the board says it did, which is all anyone has afterwards"
+mutate "the no-reboot switch is inverted" 's/"\${NO_REBOOT:-0}" = 1/"${NO_REBOOT:-0}" = 0/'
+mutate "the two hang reasons collapse into one" \
+    's/hung: the process did not leave after SIGKILL/hung: 2 cures did not restore service/'
+
+echo
 echo "== the counters"
+# Both of the next two expressions also rewrite the assignment at the top of the
+# file, because SUPERVISE_SHORT_RUN:-30 and SUPERVISE_REBOOT_FLOOR:-600 contain
+# these patterns as substrings. It is harmless - those lines sit outside every
+# extracted block, and the mutant is transient - but an anchored expression
+# written here will not behave the way its author expects.
 mutate "a short run is five seconds again" 's/SHORT_RUN:-30/SHORT_RUN:-5/'
 mutate "the run length is off by one"      's/"\$1" -lt "\${SHORT_RUN/"\$1" -le "\${SHORT_RUN/'
 mutate "a short run does not accumulate"   's/echo \$(( \$2 + 1 ))/echo 1/'

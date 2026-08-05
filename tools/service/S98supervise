@@ -335,6 +335,10 @@ capture_bounded() {   # $1 = reason
         sleep 1
     done
 
+    # This reaches the capture itself and not whatever it was waiting on: a
+    # wedged dmesg or tail is a grandchild and survives. The reboot proceeds
+    # anyway, which is the property that matters, and the survivor leaves with
+    # the board.
     log "the evidence capture did not finish, rebooting without it"
     kill -9 "$pid" 2>/dev/null
     return 0
@@ -492,9 +496,13 @@ watch_loop() {
 
             hung)
                 stuck=$(unhealthy_for)
-                log "NanoKVM-Server is up but has not answered for ${stuck}s, killing and restarting it"
 
+                # Count first, then log the count. An operator reading this
+                # file has to be able to tell "the threshold was met and a
+                # guard refused" from "the threshold was never met", and the
+                # counter is the only thing that says which.
                 failed_cures=$(next_failed_cures "$cures" "$failed_cures")
+                log "NanoKVM-Server is up but has not answered for ${stuck}s (failed_cures=$failed_cures), killing and restarting it"
 
                 if cure_hung; then
                     cures=$(( cures + 1 ))
@@ -521,9 +529,15 @@ watch_loop() {
                 : # someone asked for this
                 ;;
             restart)
+                # `ran` is the time since the last observation, not how long the
+                # run lasted: `started` is reset on every healthy poll, so a
+                # server that answers between crashes never accumulates here.
+                # SHORT_RUN therefore does not discriminate inside this loop -
+                # every value it sees is about INTERVAL - and the crash loop is
+                # timed by the poll and the backoff instead.
                 ran=$(( $(now) - started ))
                 short_runs=$(next_short_runs "$ran" "$short_runs")
-                log "NanoKVM-Server is gone after ${ran}s, restarting in ${delay}s"
+                log "NanoKVM-Server is gone after ${ran}s (short_runs=$short_runs), restarting in ${delay}s"
 
                 if [ "$(should_reboot restart "$short_runs" 0 "$(now)" "$served_ever")" = yes ]; then
                     escalate "crash loop: $short_runs runs shorter than ${SHORT_RUN:-30}s"
@@ -569,7 +583,11 @@ start() {
     setsid "$0" __watch < /dev/null > /dev/null 2>&1 &
     echo "$!" > "$PIDFILE"
 
-    log "supervisor started as pid $!, checking every ${INTERVAL}s"
+    # The thresholds go in the log because /data survives the reboot they cause.
+    # Without them a reboot directory produced by a test with the floor at 0
+    # reads exactly like one produced by a real incident, for whoever opens it
+    # afterwards - and that is the only record of which run it was.
+    log "supervisor started as pid $!, checking every ${INTERVAL}s (floor ${REBOOT_FLOOR}s, ${CRASH_LOOP_N} short runs, ${HANG_CURES_K} cures, no_reboot=${NO_REBOOT})"
     echo "OK (pid $!, every ${INTERVAL}s)"
 }
 

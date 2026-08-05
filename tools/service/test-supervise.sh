@@ -313,19 +313,24 @@ echo
 echo "===== rebooting, and refusing to ====="
 # SUPERVISE_NO_REBOOT exists for the hardware test and for an operator who wants
 # to leave a board in its failed state to investigate it.
+# Asserting silence would pass on any breakage that produces nothing at all, so
+# this asserts the decision was written down. That log line is the whole point of
+# the switch: it exists for the hardware test and for an operator who wants the
+# board left in its failed state, and both need to read what it would have done.
 got=$(WORK="$WORK" sh -c '
     SUPERVISE_NO_REBOOT=1
     NO_REBOOT=1
     . "$WORK/act.sh"
-    log()             { :; }
+    log()             { echo "LOG: $*"; }
     capture_bounded() { echo "captured"; }
-    sync()            { :; }
+    sync()            { echo "synced"; }
     reboot()          { echo "REBOOTED"; }
     sleep()           { :; }
     escalate "test"
 ' | tr '\n' ' ')
-[ "$got" = "" ] && note "SUPERVISE_NO_REBOOT=1 neither captures nor reboots" OK \
-                || note "SUPERVISE_NO_REBOOT=1 did [$got], want nothing" FAIL
+want="LOG: would reboot (test), but SUPERVISE_NO_REBOOT is set "
+[ "$got" = "$want" ] && note "SUPERVISE_NO_REBOOT=1 records the decision and does nothing else" OK \
+                     || note "SUPERVISE_NO_REBOOT=1 did [$got], want [$want]" FAIL
 
 got=$(WORK="$WORK" sh -c '
     NO_REBOOT=0
@@ -418,6 +423,19 @@ grep -qE 'should_reboot hung' "$SV" \
 grep -qE '^[[:space:]]+escalate "\$hang_reason"$' "$SV" \
     && note "the hang branch actually calls escalate" OK \
     || note "escalate is defined but the hang branch never reaches it" FAIL
+
+# The reason string is what lands in the evidence directory, and it is the only
+# thing that says which hang this was. A process that will not die after SIGKILL
+# is not two cures that did not work: no cure was attempted, and none would help.
+# Collapsing the two strings parses and changes no decision, so only a check that
+# both spellings exist can see it.
+counted=$(grep -c 'hang_reason="hung: \$failed_cures cures did not restore service"' "$SV")
+unkillable=$(grep -c 'hang_reason="hung: the process did not leave after SIGKILL"' "$SV")
+if [ "$counted" -eq 1 ] && [ "$unkillable" -eq 1 ]; then
+    note "the two hang reasons say different things" OK
+else
+    note "hang reasons: $counted counted, $unkillable unkillable, want one of each" FAIL
+fi
 grep -qE '^[[:space:]]+escalate "crash loop: ' "$SV" \
     && note "the restart branch actually calls escalate" OK \
     || note "escalate is defined but the restart branch never reaches it" FAIL

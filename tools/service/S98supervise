@@ -160,6 +160,23 @@ should_reboot() {
         return
     fi
 
+    # Fail closed on anything that is not a plain non-negative integer. `[ ""
+    # -lt 600 ]` is an error rather than a false comparison: the `if` is false,
+    # the floor is skipped, and the board reboots at whatever uptime it has -
+    # thirty seconds included. A guard that inverts its own meaning on bad input
+    # is not a guard. `up` comes from `cut -d. -f1 /proc/uptime`, so any failure
+    # to fork gives an empty string, and a typo in SUPERVISE_REBOOT_FLOOR opens
+    # the same hole from the other side.
+    #
+    # The floor is the comparison whose failure is dangerous; a bad short_runs
+    # or CRASH_LOOP_N errors into the safe answer already. They are checked
+    # anyway, so this function has one rule rather than a rule and an exception.
+    for num in "$up" "$short_runs" "$failed_cures" \
+               "${REBOOT_FLOOR:-600}" "${CRASH_LOOP_N:-5}" "${HANG_CURES_K:-2}"
+    do
+        case "$num" in ''|*[!0-9]*) echo no; return ;; esac
+    done
+
     if [ "$up" -lt "${REBOOT_FLOOR:-600}" ]; then
         echo no
         return

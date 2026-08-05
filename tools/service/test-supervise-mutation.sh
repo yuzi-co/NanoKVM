@@ -71,6 +71,15 @@ mutate "the floor comparison is inverted" 's/"\$up" -lt/"\$up" -ge/'
 mutate "the floor is off by one"          's/"\$up" -lt/"\$up" -le/'
 
 echo
+echo "== failing closed on input the comparisons cannot use"
+# A test that errors is a test that is false, so an unparseable value skips the
+# floor rather than blocking on it. Every one of these mutations puts a value
+# back into a comparison that cannot evaluate it.
+mutate "an empty value is not rejected"   "s/''|/'x'|/"
+mutate "letters count as numbers"         's/\[!0-9\]/[!0-9a-z]/'
+mutate "the floor's own value is unchecked" 's/^               "\${REBOOT_FLOOR:-600}" /               /'
+
+echo
 echo "== the crash-loop threshold"
 mutate "a single short run is a loop"     's/CRASH_LOOP_N:-5/CRASH_LOOP_N:-1/'
 mutate "the threshold is unreachable"     's/CRASH_LOOP_N:-5/CRASH_LOOP_N:-99/'

@@ -429,7 +429,7 @@ const en = {
           title: 'USB endpoints',
           used: '{{used}} of {{total}} used',
           cost: 'uses {{cost}}',
-          needs: 'needs {{cost}}, {{free}} free',
+          needs: 'needs {{cost}}',
           full: 'Not enough USB endpoints. Turn something else off first.',
           inactive:
             'On, but not running: the USB controller ran out of endpoints. Turn another device off and this one starts straight away.',

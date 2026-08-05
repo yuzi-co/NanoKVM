@@ -2,6 +2,7 @@ package vm
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -186,5 +187,72 @@ func TestPriorityOrderIsAudioFirstConsoleLast(t *testing.T) {
 	want := []string{"audio", "network", "disk", "console"}
 	if !reflect.DeepEqual(order, want) {
 		t.Errorf("drop order is %v, want %v", order, want)
+	}
+}
+
+// The refusal is the whole interactive experience of this feature. "Operation
+// failed" would leave the operator exactly where they were before it existed:
+// switching things at random and losing HID.
+func TestRefusalMessageNamesTheNumbersAndTheWayOut(t *testing.T) {
+	message := refusalMessage("network", 1, []string{"disk", "console"})
+
+	for _, want := range []string{"network", "3", "1 free", "disk", "console"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("refusal %q does not mention %q", message, want)
+		}
+	}
+}
+
+func TestRefusalMessageWithNothingToSuggest(t *testing.T) {
+	message := refusalMessage("network", 0, nil)
+
+	if strings.Contains(message, "turn off") {
+		t.Errorf("refusal %q offers a way out when there is none", message)
+	}
+
+	if !strings.Contains(message, "network") {
+		t.Errorf("refusal %q does not name the device", message)
+	}
+}
+
+// Every entry in the table that has a device name must be reachable through the
+// toggle, and every name the toggle accepts must be in the table. A name in one
+// and not the other is a switch that reports success and changes nothing, or a
+// function the budget cannot see.
+//
+// This lives here rather than with the table in Task 1 because it asserts an
+// agreement between two files, and the second half of that agreement - the
+// console's entry in commandsFor - is added by Step 5 below.
+func TestEveryTogglableFunctionHasCommands(t *testing.T) {
+	for _, function := range usbFunctions {
+		if function.device == "" {
+			t.Errorf("%s has no device name, so nothing can switch it", function.name)
+			continue
+		}
+
+		if _, _, _, ok := commandsFor(function.device); !ok {
+			t.Errorf("commandsFor does not know %q", function.device)
+		}
+	}
+}
+
+// The gadget path is what the API reports as active, so a wrong name would
+// report every function dead and the UI would warn about all of them.
+func TestEveryFunctionNamesItsGadgetDirectory(t *testing.T) {
+	want := map[string]string{
+		"console": "acm.GS0",
+		"disk":    "mass_storage.disk0",
+		"audio":   "uac1.usb0",
+	}
+
+	for _, function := range usbFunctions {
+		if function.name == "network" {
+			// Two possible directories, checked separately below.
+			continue
+		}
+
+		if function.gadget != want[function.name] {
+			t.Errorf("%s links %q, want %q", function.name, function.gadget, want[function.name])
+		}
 	}
 }

@@ -69,6 +69,13 @@ mutate "one failed cure is enough"        's/HANG_CURES_K:-2/HANG_CURES_K:-1/'
 mutate "the cure count is off by one"     's/"\$failed_cures" -ge/"\$failed_cures" -gt/'
 
 echo
+echo "== the counters"
+mutate "a short run is five seconds again" 's/SHORT_RUN:-30/SHORT_RUN:-5/'
+mutate "the run length is off by one"      's/"\$1" -lt "\${SHORT_RUN/"\$1" -le "\${SHORT_RUN/'
+mutate "a short run does not accumulate"   's/echo \$(( \$2 + 1 ))/echo 1/'
+mutate "the first hang counts as a failure" 's/"\$1" -gt 0/"\$1" -ge 0/'
+
+echo
 if [ "$fails" -eq 0 ]; then
     echo "===== every mutation was caught ====="
 else

@@ -163,6 +163,37 @@ should_reboot() {
 }
 # --- end escalate ---
 
+# --- count ---
+# Two counters, kept as functions so the test measures what ships. They take the
+# same shape as delay_after_run: the observation and the current value in, the
+# next value out.
+#
+# SHORT_RUN is 30s and not the one second the process really survives. watch_loop
+# sleeps INTERVAL between checks and resets `started` after each start, so `ran`
+# is quantised to the poll and never reports below about five seconds - a
+# five-second threshold would be an assertion that can never be true. Thirty sits
+# clear above that quantisation and clear below the sixty seconds delay_after_run
+# already uses to mean the fault was transient.
+next_short_runs() {   # $1 = seconds the run lasted, $2 = current count
+    if [ "$1" -lt "${SHORT_RUN:-30}" ]; then
+        echo $(( $2 + 1 ))
+    else
+        echo 0
+    fi
+}
+
+# A hung verdict that arrives after a cure proves that cure did not work. The
+# first hung verdict of a fault follows no cure, so it counts nothing: otherwise
+# the first hang a board ever had would be one step away from a reboot.
+next_failed_cures() {   # $1 = cures attempted so far, $2 = current count
+    if [ "$1" -gt 0 ]; then
+        echo $(( $2 + 1 ))
+    else
+        echo "$2"
+    fi
+}
+# --- end count ---
+
 # --- cure ---
 # A hang has to be killed, not asked to stop. S95nanokvm's restart uses killall,
 # which sends SIGTERM, and a wedged process may never act on it - it would keep

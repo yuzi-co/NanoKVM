@@ -237,22 +237,73 @@ func TestEveryTogglableFunctionHasCommands(t *testing.T) {
 }
 
 // The gadget path is what the API reports as active, so a wrong name would
-// report every function dead and the UI would warn about all of them.
+// report every function dead and the UI would warn about all of them. The
+// network's names come straight from the `ln -s` targets in S03usbdev: NCM is
+// the primary and RNDIS is the fallback S03usbdev builds when only the RNDIS
+// marker is set.
 func TestEveryFunctionNamesItsGadgetDirectory(t *testing.T) {
 	want := map[string]string{
 		"console": "acm.GS0",
 		"disk":    "mass_storage.disk0",
+		"network": "ncm.usb0",
 		"audio":   "uac1.usb0",
 	}
+	wantAlt := map[string]string{
+		"network": "rndis.usb0",
+	}
+
+	seen := make(map[string]bool, len(usbFunctions))
 
 	for _, function := range usbFunctions {
-		if function.name == "network" {
-			// Two possible directories, checked separately below.
+		seen[function.name] = true
+
+		gadget, ok := want[function.name]
+		if !ok {
 			continue
 		}
 
-		if function.gadget != want[function.name] {
-			t.Errorf("%s links %q, want %q", function.name, function.gadget, want[function.name])
+		if function.gadget != gadget {
+			t.Errorf("%s links %q, want %q", function.name, function.gadget, gadget)
 		}
+
+		if alt, ok := wantAlt[function.name]; ok && function.gadgetAlt != alt {
+			t.Errorf("%s falls back to %q, want %q", function.name, function.gadgetAlt, alt)
+		}
+	}
+
+	// A function dropped from usbFunctions would otherwise leave its entry in
+	// want unconsulted, and the test above would pass without ever noticing.
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("%q is missing from usbFunctions", name)
+		}
+	}
+}
+
+// active takes an injected predicate specifically so it can be tested without
+// the real configfs tree. These three cases are the ones that matter: the
+// primary directory alone, only the alternate, and neither - which is the one
+// a deleted or mis-wired gadgetAlt branch would get wrong.
+func TestActiveIsTrueWithOnlyThePrimaryDirectoryLinked(t *testing.T) {
+	function := usbFunction{gadget: "ncm.usb0", gadgetAlt: "rndis.usb0"}
+
+	if !function.active(presence("ncm.usb0")) {
+		t.Error("not active with the primary gadget directory linked")
+	}
+}
+
+func TestActiveIsTrueWithOnlyTheAlternateDirectoryLinked(t *testing.T) {
+	function := usbFunction{gadget: "ncm.usb0", gadgetAlt: "rndis.usb0"}
+
+	if !function.active(presence("rndis.usb0")) {
+		t.Error("not active with only the alternate gadget directory linked")
+	}
+}
+
+func TestActiveIsFalseWithNeitherDirectoryLinked(t *testing.T) {
+	function := usbFunction{gadget: "ncm.usb0", gadgetAlt: "rndis.usb0"}
+
+	if function.active(presence()) {
+		t.Error("active with neither gadget directory linked")
 	}
 }

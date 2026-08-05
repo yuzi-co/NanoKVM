@@ -22,6 +22,11 @@
 # Environment:
 #   SUPERVISE_INTERVAL   seconds between checks   (default 5)
 #   SUPERVISE_LOG        where events go          (default /data/supervise.log)
+#   SUPERVISE_REBOOT_FLOOR  uptime below which it never reboots  (default 600)
+#   SUPERVISE_SHORT_RUN     a run shorter than this counts       (default 30)
+#   SUPERVISE_CRASH_LOOP_N  short runs that trigger a reboot     (default 5)
+#   SUPERVISE_HANG_CURES    failed cures that trigger a reboot   (default 2)
+#   SUPERVISE_NO_REBOOT     1 logs the decision and does not act (default 0)
 
 INTERVAL=${SUPERVISE_INTERVAL:-5}
 # Seconds a process may be alive and not answering before it counts as hung. A
@@ -32,6 +37,15 @@ HANG_AFTER=${SUPERVISE_HANG_AFTER:-60}
 HEALTH_URL=${SUPERVISE_URL:-http://127.0.0.1/}
 LOG=${SUPERVISE_LOG:-/data/supervise.log}
 PIDFILE=/tmp/supervise.pid
+
+# Escalation thresholds. Each takes an environment override in the same style as
+# INTERVAL and HANG_AFTER above, and each default is repeated at the point of use
+# so an extracted block measures the value that ships.
+REBOOT_FLOOR=${SUPERVISE_REBOOT_FLOOR:-600}
+SHORT_RUN=${SUPERVISE_SHORT_RUN:-30}
+CRASH_LOOP_N=${SUPERVISE_CRASH_LOOP_N:-5}
+HANG_CURES_K=${SUPERVISE_HANG_CURES:-2}
+NO_REBOOT=${SUPERVISE_NO_REBOOT:-0}
 
 SERVER_BIN=${SERVER_BIN:-/tmp/server/NanoKVM-Server}
 SYSTEM_BIN=${SYSTEM_BIN:-/tmp/kvm_system/kvm_system}
@@ -99,6 +113,55 @@ action() {
     fi
 }
 # --- end decide ---
+
+# --- escalate ---
+# The cures above assume the fault is in the process. Some faults are not: an
+# exhausted ION carveout is leaked inside the kernel modules, and `rmmod
+# soph_vpss` answers `Resource temporarily unavailable` with zero processes
+# running. No userspace action frees it, so restarting is a guaranteed-failure
+# loop. Only a reboot clears it, and that reboot is clean - the board came back
+# in about ten seconds with HID, the ACM console and the UAC1 card all present.
+#
+# The trigger is blind. It counts failures and never reads dmesg to decide.
+# The ring buffer holds about eight crashes and rolls within ten minutes, so a
+# signature-gated guard would get weaker exactly as the fault got worse. A
+# reboot is also the right cure for any cause a fresh boot clears - a leaked
+# carveout, a wedged driver, a stuck VB pool - and naming one of them would
+# narrow the fix to the instance that happened to be caught. The signature is
+# still captured afterwards, as evidence rather than as a gate.
+#
+# The guard against a reboot loop is uptime, not a counter, because that follows
+# the physics: a leak that refills faster than the floor is a leak a reboot
+# cannot cure, so this refuses to try. It also keeps the property the rest of
+# this script has - telling one state from another needs no new state on disk.
+#
+# Every input is passed in. Nothing here reads a clock, a file or a process.
+should_reboot() {
+    verdict=$1; short_runs=$2; failed_cures=$3; up=$4
+
+    if [ "$up" -lt "${REBOOT_FLOOR:-600}" ]; then
+        echo no
+        return
+    fi
+
+    case "$verdict" in
+        restart)
+            if [ "$short_runs" -ge "${CRASH_LOOP_N:-5}" ]; then
+                echo yes
+                return
+            fi
+            ;;
+        hung)
+            if [ "$failed_cures" -ge "${HANG_CURES_K:-2}" ]; then
+                echo yes
+                return
+            fi
+            ;;
+    esac
+
+    echo no
+}
+# --- end escalate ---
 
 # --- cure ---
 # A hang has to be killed, not asked to stop. S95nanokvm's restart uses killall,

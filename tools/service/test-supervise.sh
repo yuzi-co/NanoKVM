@@ -347,9 +347,12 @@ grep -qE 'should_reboot hung' "$SV" \
 grep -qE '^[[:space:]]+escalate ' "$SV" \
     && note "something actually calls escalate" OK \
     || note "escalate is defined and never called" FAIL
-grep -qE 'next_short_runs|next_failed_cures' "$SV" \
-    && note "the counters are read by the loop" OK \
-    || note "the counters are defined and never used" FAIL
+grep -qE '^[[:space:]]+short_runs=\$\(next_short_runs ' "$SV" \
+    && note "the restart branch actually updates short_runs" OK \
+    || note "next_short_runs is defined and never called" FAIL
+grep -qE '^[[:space:]]+failed_cures=\$\(next_failed_cures ' "$SV" \
+    && note "the hang branch actually updates failed_cures" OK \
+    || note "next_failed_cures is defined and never called" FAIL
 
 echo
 if [ "$fails" -eq 0 ]; then

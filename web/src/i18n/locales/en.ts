@@ -420,6 +420,22 @@ const en = {
         audio: 'Virtual Speaker',
         audioDesc:
           'Present a USB sound card to the remote host, so you can hear it. The host must select it as its output device. Switching this rebuilds the USB connection.',
+        console: 'Serial Console',
+        consoleDesc:
+          'Present a USB serial port to the remote host, for logging in to this NanoKVM when the network is unreachable',
+        consoleTip:
+          'Anyone who controls the remote host gets a login prompt on this NanoKVM. Set a strong password before enabling (Account - Change Password).',
+        endpoints: {
+          title: 'USB endpoints',
+          used: '{{used}} of {{total}} used',
+          cost: 'uses {{cost}}',
+          needs: 'needs {{cost}}, {{free}} free',
+          full: 'Not enough USB endpoints. Turn something else off first.',
+          inactive:
+            'On, but not running: the USB controller ran out of endpoints. Turn another device off and it starts on the next reboot.',
+          explain:
+            'The USB controller has a fixed number of endpoints. If more devices are enabled than fit, the keyboard and mouse are kept and the rest are turned off.'
+        },
         reboot: 'Reboot',
         rebootDesc: 'Are you sure you want to reboot NanoKVM?',
         okBtn: 'Yes',

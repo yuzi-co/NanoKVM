@@ -1,18 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Switch } from 'antd';
+import { Progress, Switch, Tooltip } from 'antd';
 import { useTranslation } from 'react-i18next';
 
 import { getHidMode } from '@/api/hid.ts';
 import * as api from '@/api/virtual-device.ts';
+import type {
+  VirtualDeviceName,
+  VirtualDevices as VirtualDevicesState
+} from '@/api/virtual-device.ts';
 
 export const VirtualDevices = () => {
   const { t } = useTranslation();
 
   const [isHidOnlyMode, setIsHidOnlyMode] = useState(false);
-  const [isDiskEnabled, setIsDiskEnabled] = useState(false);
-  const [isNetworkEnabled, setIsNetworkEnabled] = useState(false);
-  const [isAudioEnabled, setIsAudioEnabled] = useState(false);
-  const [loading, setLoading] = useState<'' | 'disk' | 'network' | 'audio'>('');
+  const [devices, setDevices] = useState<VirtualDevicesState | null>(null);
+  const [loading, setLoading] = useState<'' | VirtualDeviceName>('');
+  const [refusal, setRefusal] = useState('');
 
   useEffect(() => {
     getHidOnlyMode();
@@ -40,22 +43,23 @@ export const VirtualDevices = () => {
         return;
       }
 
-      setIsDiskEnabled(rsp.data.disk);
-      setIsNetworkEnabled(rsp.data.network);
-      setIsAudioEnabled(rsp.data.audio);
+      setDevices(rsp.data);
     } catch (err) {
       console.log(err);
     }
   }
 
-  async function update(device: 'disk' | 'network' | 'audio') {
+  async function update(device: VirtualDeviceName) {
     if (loading) return;
     setLoading(device);
+    setRefusal('');
 
     try {
       const rsp = await api.updateVirtualDevice(device);
       if (rsp.code !== 0) {
-        console.log(rsp.msg);
+        // The server owns the numbers, so show its sentence rather than
+        // recomputing the budget here and risking a different answer.
+        setRefusal(rsp.msg);
         return;
       }
 
@@ -80,49 +84,82 @@ export const VirtualDevices = () => {
     );
   }
 
+  const free = devices ? devices.total - devices.used : 0;
+
+  function row(device: VirtualDeviceName) {
+    if (!devices) return null;
+
+    const state = devices[device];
+    const fits = state.enabled || state.cost <= free;
+
+    return (
+      <div className="flex items-center justify-between">
+        <div className="flex flex-col space-y-1">
+          <span>{t(`settings.device.${device}`)}</span>
+          <span className="text-xs text-neutral-500">{t(`settings.device.${device}Desc`)}</span>
+
+          {device === 'console' && (
+            <span className="text-xs text-amber-500">{t('settings.device.consoleTip')}</span>
+          )}
+
+          {state.enabled && !state.active && (
+            <span className="text-xs text-amber-500">
+              {t('settings.device.endpoints.inactive')}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center space-x-3">
+          <span className="text-xs text-neutral-500">
+            {state.enabled
+              ? t('settings.device.endpoints.cost', { cost: state.cost })
+              : t('settings.device.endpoints.needs', { cost: state.cost, free })}
+          </span>
+
+          <Tooltip title={fits ? '' : t('settings.device.endpoints.full')}>
+            <Switch
+              checked={state.enabled}
+              disabled={!fits}
+              loading={loading === device}
+              onChange={() => update(device)}
+            />
+          </Tooltip>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
-      {/* Virtual Disk */}
-      <div className="flex items-center justify-between">
+      {devices && (
         <div className="flex flex-col space-y-1">
-          <span>{t('settings.device.disk')}</span>
-          <span className="text-xs text-neutral-500">{t('settings.device.diskDesc')}</span>
+          <div className="flex items-center justify-between">
+            <span>{t('settings.device.endpoints.title')}</span>
+            <span className="text-xs text-neutral-500">
+              {t('settings.device.endpoints.used', {
+                used: devices.used,
+                total: devices.total
+              })}
+            </span>
+          </div>
+
+          <Progress
+            percent={(devices.used / devices.total) * 100}
+            showInfo={false}
+            size="small"
+            strokeColor={free === 0 ? '#f59e0b' : undefined}
+          />
+
+          <span className="text-xs text-neutral-500">{t('settings.device.endpoints.explain')}</span>
         </div>
+      )}
 
-        <Switch
-          checked={isDiskEnabled}
-          loading={loading === 'disk'}
-          onChange={() => update('disk')}
-        />
-      </div>
+      {refusal && <span className="text-xs text-red-500">{refusal}</span>}
 
-      {/* Virtual Network */}
-      <div className="flex items-center justify-between">
-        <div className="flex flex-col space-y-1">
-          <span>{t('settings.device.network')}</span>
-          <span className="text-xs text-neutral-500">{t('settings.device.networkDesc')}</span>
-        </div>
-
-        <Switch
-          checked={isNetworkEnabled}
-          loading={loading === 'network'}
-          onChange={() => update('network')}
-        />
-      </div>
-
-      {/* Virtual Speaker */}
-      <div className="flex items-center justify-between">
-        <div className="flex flex-col space-y-1">
-          <span>{t('settings.device.audio')}</span>
-          <span className="text-xs text-neutral-500">{t('settings.device.audioDesc')}</span>
-        </div>
-
-        <Switch
-          checked={isAudioEnabled}
-          loading={loading === 'audio'}
-          onChange={() => update('audio')}
-        />
-      </div>
+      {row('console')}
+      {row('disk')}
+      {row('network')}
+      {row('audio')}
     </>
   );
 };

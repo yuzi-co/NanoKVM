@@ -104,10 +104,12 @@ echo "== clearing the counters"
 # so clearing on the verdict name alone would wipe the counters before the
 # counted hang escalation could ever reach its threshold.
 mutate "any healthy verdict clears the counters" 's/if \[ "\$2" = yes \]/if true/'
-# A single-line s/// cannot reach across the "stopped)" / "echo yes" pair, so
-# this addresses the stopped case and pulls its next line into the pattern
-# space with N before substituting - portable to busybox sed as well as GNU.
-mutate "a deliberate stop does not clear"  '/stopped)/{N;s/echo yes/echo no/}'
+# The other direction on the arm that now carries the whole decision. A single
+# s/// cannot reach across the arm and its body, so this matches the fallthrough
+# label and pulls the next line into the pattern space with N before
+# substituting - portable to busybox sed as well as GNU. The eight leading
+# spaces keep it off the two other `*)` arms in the file, which sit at four.
+mutate "a verdict other than healthy clears" '/^        \*)/{N;s/echo no/echo yes/}'
 
 echo
 if [ "$fails" -eq 0 ]; then

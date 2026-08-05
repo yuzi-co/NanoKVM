@@ -238,8 +238,17 @@ next_failed_cures() {   # $1 = cures attempted so far, $2 = current count
 # every cure and its next hung verdict, and the counted hang escalation can
 # then never reach its threshold. Only an answer clears them.
 #
-# A deliberate stop clears them too. The operator ended the fault, and stale
-# cure counts must not shorten the road to a reboot when the server comes back.
+# `stopped` is the same defect through a different door, and it arrives on the
+# condition the fault comes with. cure_hung calls S95nanokvm restart, which
+# removes /tmp/server and copies 36MB back: for that whole window there is no
+# process and no binary, which is exactly what a deliberate stop looks like. A
+# slow SD card therefore cleared the counters between every cure and the hung
+# verdict that should have counted it. Measured: a 20-second re-stage escalated
+# on the third hung verdict, a 40-second re-stage never escalated at all.
+#
+# Nothing is lost by refusing. An operator who stops the server and brings it
+# back produces an answering healthy poll, and that clears the counters through
+# the arm no cure can be mistaken for.
 should_clear() {   # $1 = verdict, $2 = did the probe answer this pass, yes or no
     case "$1" in
         healthy)
@@ -248,9 +257,6 @@ should_clear() {   # $1 = verdict, $2 = did the probe answer this pass, yes or n
             else
                 echo no
             fi
-            ;;
-        stopped)
-            echo yes
             ;;
         *)
             echo no

@@ -52,7 +52,20 @@ mutate() {
     fi
 }
 
-echo "== the floor, which is the only thing between this and a board that must be opened"
+echo "== the latch, which is the only thing between this and a reboot cycle"
+# The floor sets the period of a cycle and does not prevent one: the counters do
+# not survive a reboot, so a fault present from boot escalates again as soon as
+# uptime passes the floor. Only "this server answered at least once since this
+# boot" tells a board that broke from a board that never worked.
+mutate "the served-ever latch is inverted" 's/"\$served_ever" != yes/"\$served_ever" = yes/'
+mutate "the latch can never fire"          's/\[ "\$served_ever" != yes \]/[ 1 -eq 2 ]/'
+# should_clear must not reach the latch. Clearing it with the counters restores
+# the cycle exactly, and no unit case can see that - only the count of the
+# places that assign it.
+mutate "the latch is cleared with the counters" 's/^            cures=0$/            served_ever=no/'
+
+echo
+echo "== the floor, which sets how often a reboot cycle could turn"
 mutate "the floor is removed"            's/REBOOT_FLOOR:-600/REBOOT_FLOOR:-0/'
 mutate "the floor comparison is inverted" 's/"\$up" -lt/"\$up" -ge/'
 mutate "the floor is off by one"          's/"\$up" -lt/"\$up" -le/'

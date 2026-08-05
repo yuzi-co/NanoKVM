@@ -173,22 +173,38 @@ echo "===== when restarting cannot work, reboot ====="
 # second. On 2026-08-04 that produced 23 restarts over 22 minutes into a
 # guaranteed failure, and it would have continued indefinitely.
 escalate_case() {
-    desc="$1"; verdict="$2"; short="$3"; cures="$4"; up="$5"; want="$6"
-    got=$(WORK="$WORK" sh -c ". \"\$WORK/escalate.sh\"; should_reboot $verdict $short $cures $up")
+    desc="$1"; verdict="$2"; short="$3"; cures="$4"; up="$5"; ever="$6"; want="$7"
+    got=$(WORK="$WORK" sh -c ". \"\$WORK/escalate.sh\"; should_reboot $verdict $short $cures $up $ever")
     [ "$got" = "$want" ] && note "$desc -> $got" OK || note "$desc -> $got, want $want" FAIL
 }
 
-#              desc                                            verdict short cures up   want
-escalate_case "five short runs on a board that has been up"    restart 5  0  3600 yes
-escalate_case "four short runs is not a loop yet"              restart 4  0  3600 no
-escalate_case "no short runs at all"                           restart 0  0  3600 no
-escalate_case "two failed cures on a board that has been up"   hung    0  2  3600 yes
-escalate_case "one failed cure is not enough"                  hung    0  1  3600 no
+#              desc                                            verdict short cures up   ever want
+escalate_case "five short runs on a board that has been up"    restart 5  0  3600 yes  yes
+escalate_case "four short runs is not a loop yet"              restart 4  0  3600 yes  no
+escalate_case "no short runs at all"                           restart 0  0  3600 yes  no
+escalate_case "two failed cures on a board that has been up"   hung    0  2  3600 yes  yes
+escalate_case "one failed cure is not enough"                  hung    0  1  3600 yes  no
 
 # A deliberate stop is the operator's intent, and a healthy server has nothing
 # wrong with it. Neither is ever a reason to take the KVM away from someone.
-escalate_case "a deliberate stop is never escalated"           stopped 99 99 3600 no
-escalate_case "a healthy server is never escalated"            healthy 99 99 3600 no
+escalate_case "a deliberate stop is never escalated"           stopped 99 99 3600 yes  no
+escalate_case "a healthy server is never escalated"            healthy 99 99 3600 yes  no
+
+echo
+echo "  --- a board that has never served since boot is never rebooted"
+# The floor sets the period of a reboot cycle. It does not prevent one: a fault
+# present from boot keeps producing restart or hung verdicts, the counters do not
+# survive a reboot, and the moment uptime crosses the floor the same sequence
+# escalates again. Measured against the shipped loop, that is every 10.5 minutes
+# forever - a board that answers nothing and cannot be repaired.
+#
+# A reboot cures a board that worked and then broke. It is never a cure for a
+# server that has not answered once since this boot: an unreadable certificate,
+# a binary that skipped patchelf, a truncated copy from a full SD card - all of
+# them leave the binary staged and executable, so the verdict is restart, and
+# all of them survive a reboot unchanged.
+escalate_case "a crash loop that never answered since boot"    restart 9  0  3600 no   no
+escalate_case "a hang that never answered since boot"          hung    0  9  3600 no   no
 
 echo
 echo "  --- the floor: the one check between this and a board that must be opened"
@@ -201,12 +217,12 @@ echo "  --- the floor: the one check between this and a board that must be opene
 # it returns at low uptime and no second reboot happens: the board stays up and
 # reachable over ssh for a person to work on, which is what happens today anyway.
 # A leak that refills faster than the floor is a leak a reboot cannot cure.
-escalate_case "crash loop one second under the floor"          restart 5  0  599  no
-escalate_case "crash loop straight out of boot"                restart 9  0  0    no
-escalate_case "hang one second under the floor"                hung    0  2  599  no
-escalate_case "hang straight out of boot"                      hung    0  9  0    no
-escalate_case "crash loop exactly at the floor"                restart 5  0  600  yes
-escalate_case "hang exactly at the floor"                      hung    0  2  600  yes
+escalate_case "crash loop one second under the floor"          restart 5  0  599  yes  no
+escalate_case "crash loop straight out of boot"                restart 9  0  0    yes  no
+escalate_case "hang one second under the floor"                hung    0  2  599  yes  no
+escalate_case "hang straight out of boot"                      hung    0  9  0    yes  no
+escalate_case "crash loop exactly at the floor"                restart 5  0  600  yes  yes
+escalate_case "hang exactly at the floor"                      hung    0  2  600  yes  yes
 
 echo
 echo "===== counting the runs that did not last ====="
@@ -385,6 +401,27 @@ grep -qE '^[[:space:]]+failed_cures=\$\(next_failed_cures ' "$SV" \
 grep -qE '^[[:space:]]+if \[ "\$\(should_clear ' "$SV" \
     && note "the loop actually asks should_clear before wiping the counters" OK \
     || note "should_clear is defined and never called" FAIL
+
+# The latch has to reach both decisions, or half the reboot cycle comes back.
+grep -qE '^[[:space:]]+served_ever=yes$' "$SV" \
+    && note "the loop sets the latch when the probe answers" OK \
+    || note "nothing ever sets served_ever, so no board could reboot" FAIL
+grep -qE 'should_reboot restart .*"\$served_ever"' "$SV" \
+    && note "the restart branch passes the latch" OK \
+    || note "the restart branch judges without the latch" FAIL
+grep -qE 'should_reboot hung .*"\$served_ever"' "$SV" \
+    && note "the hang branch passes the latch" OK \
+    || note "the hang branch judges without the latch" FAIL
+
+# served_ever is a per-boot latch, not a counter. should_clear must never reach
+# it: a fault present from boot would then escalate as soon as the floor let it,
+# the counters would not survive the reboot, and the identical sequence would
+# repeat every REBOOT_FLOOR seconds for as long as the board had power.
+if [ "$(grep -c '^[[:space:]]*served_ever=no$' "$SV")" -eq 1 ]; then
+    note "the latch is set once at boot and never cleared" OK
+else
+    note "served_ever is assigned no in more than one place, so it is a counter" FAIL
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then

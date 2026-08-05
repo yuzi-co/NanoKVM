@@ -138,6 +138,166 @@ got=$(WORK="$WORK" sh -c '. "$WORK/budget.sh"; usb_dropped "console audio" "cons
 [ -z "$got" ] && note "nothing dropped when everything fits" OK || note "dropped [$got], want nothing" FAIL
 
 echo
+echo "===== what the prune gives back ====="
+# start_usb_dev only ever adds, and `stop` leaves configs/c.1 untouched, so a
+# function linked by an earlier start survives a later start that dropped it.
+# usb_prune_list names the config symlinks that have to go before the link pass.
+prune_case() {
+    desc="$1"; keep="$2"; want="$3"
+    got=$(WORK="$WORK" KEEP="$keep" sh -c '. "$WORK/budget.sh"; usb_prune_list "$KEEP"')
+    got=$(echo $got)
+    [ "$got" = "$want" ] && note "$desc -> [$got]" OK || note "$desc -> [$got], want [$want]" FAIL
+}
+prune_case "an empty keep set drops all four"          "" \
+    "acm.GS0 mass_storage.disk0 ncm.usb0 rndis.usb0 uac1.usb0"
+prune_case "a full keep set drops none"                "console disk network audio" ""
+prune_case "console + network drops disk and audio"    "console network" \
+    "mass_storage.disk0 uac1.usb0"
+prune_case "the boot set drops both network flavours"  "console disk audio" \
+    "ncm.usb0 rndis.usb0"
+# A name the table does not know keeps nothing, so everything is pruned. The
+# keep set is produced by usb_resolve, but a typo there must fail closed - link
+# nothing extra - rather than leave a dropped function linked.
+prune_case "an unknown keep name keeps nothing"        "nonsense" \
+    "acm.GS0 mass_storage.disk0 ncm.usb0 rndis.usb0 uac1.usb0"
+
+# The rule with no exception, restated against the prune. hid.GS0, hid.GS1 and
+# hid.GS2 are gated on /boot/disable_hid alone and never enter the keep set, so
+# a prune that walked configs/c.1 would delete the keyboard and both mice from
+# any board that is over budget. It must also print bare directory names: a
+# name carrying a path lets `rm -f configs/c.1/$name` escape the config
+# directory and reach functions/, whose removal blocks forever on the getty.
+prune_hid=""
+prune_path=""
+for a in "" console
+do
+    for b in "" disk
+    do
+        for c in "" network
+        do
+            for d in "" audio
+            do
+                got=$(WORK="$WORK" KEEP="$a $b $c $d" sh -c '. "$WORK/budget.sh"; usb_prune_list "$KEEP"')
+                case "$got" in *hid*) prune_hid="$prune_hid [$a $b $c $d]" ;; esac
+                case "$got" in */*)   prune_path="$prune_path [$a $b $c $d]" ;; esac
+            done
+        done
+    done
+done
+[ -z "$prune_hid" ] && note "no keep set makes the prune name a hid function" OK \
+                    || note "the prune named hid for$prune_hid" FAIL
+[ -z "$prune_path" ] && note "the prune names directories, never paths" OK \
+                     || note "the prune printed a path for$prune_path" FAIL
+
+# usb_gadget_dirs is the mapping the prune reads. HID is not in it, and neither
+# is anything else the keep set cannot name.
+for name in hid hid.GS0 disable_hid ""
+do
+    got=$(WORK="$WORK" NAME="$name" sh -c '. "$WORK/budget.sh"; usb_gadget_dirs "$NAME"')
+    got=$(echo $got)
+    [ -z "$got" ] && note "usb_gadget_dirs [$name] maps to nothing" OK \
+                  || note "usb_gadget_dirs [$name] gave [$got], want nothing" FAIL
+done
+
+echo
+echo "===== the config a second start leaves behind ====="
+# The four-step scenario the prune exists for, driven through the real
+# functions. Boot with usb.acm, usb.ncm, usb.disk0 and usb.uac all present:
+# twelve endpoints are wanted, console+disk+audio is kept, and the network is
+# never linked. The operator then switches the disk off in the web UI, which
+# removes the disk symlink and its marker and restarts this script. The resolve
+# now keeps console+network - and uac1.usb0, linked by the first start, has to
+# be gone before the link pass. Left behind it makes hid(3) + acm(3) + ncm(3) +
+# uac1(1) = 10 against a budget of 9: the gadget does not bind, /dev/hidg0..2
+# never appear, and every command still exits 0 so the UI reports success.
+sim=$(WORK="$WORK" HID=3 sh -c '
+    . "$WORK/budget.sh"
+    usb_hid_cost() { echo "$HID"; }
+
+    G="$WORK/sim"; rm -rf "$G"; mkdir -p "$G/functions" "$G/configs/c.1"
+    cd "$G"
+
+    # An entry in configs/c.1 stands in for the symlink the real script makes.
+    # A plain file is deliberate: rm -f treats a symlink and a file alike, and
+    # a real symlink would make this case depend on the host filesystem rather
+    # than on the prune. What is under test is which entries survive.
+    link() { mkdir -p "functions/$1"; : > "configs/c.1/$1"; }
+    listing() { ls configs/c.1 | sort | tr "\n" " "; }
+
+    # Step 1: the first boot. hid is unconditional; the kept set is linked.
+    keep1=$(usb_resolve "console disk network audio" "$(usb_budget)")
+    link hid.GS0; link hid.GS1; link hid.GS2
+    for name in $keep1
+    do
+        for dir in $(usb_gadget_dirs "$name")
+        do
+            [ "$dir" = rndis.usb0 ] && continue
+            link "$dir"
+        done
+    done
+    echo "KEEP1:$(echo $keep1)"
+    echo "STEP1:$(listing)"
+
+    # Step 2: the disk toggle. This is exactly unmountDiskCommands.
+    rm -f configs/c.1/mass_storage.disk0
+
+    # Step 3: markers are acm + ncm + uac now.
+    keep2=$(usb_resolve "console network audio" "$(usb_budget)")
+    echo "KEEP2:$(echo $keep2)"
+
+    # Step 4: the prune, then the link pass - the order start_usb_dev uses.
+    for usb_stale in $(usb_prune_list "$keep2")
+    do
+        rm -f "configs/c.1/$usb_stale"
+    done
+    for name in $keep2
+    do
+        for dir in $(usb_gadget_dirs "$name")
+        do
+            [ "$dir" = rndis.usb0 ] && continue
+            link "$dir"
+        done
+    done
+    echo "STEP4:$(listing)"
+')
+
+sim_field() { printf '%s\n' "$sim" | sed -n "s/^$1://p" | sed 's/ *$//'; }
+
+got=$(sim_field KEEP1)
+[ "$got" = "console disk audio" ] && note "step 1 keeps [$got]" OK \
+                                  || note "step 1 keeps [$got], want [console disk audio]" FAIL
+
+got=$(sim_field STEP1)
+want="acm.GS0 hid.GS0 hid.GS1 hid.GS2 mass_storage.disk0 uac1.usb0"
+[ "$got" = "$want" ] && note "step 1 links [$got]" OK \
+                     || note "step 1 links [$got], want [$want]" FAIL
+
+got=$(sim_field KEEP2)
+[ "$got" = "console network" ] && note "step 3 keeps [$got]" OK \
+                              || note "step 3 keeps [$got], want [console network]" FAIL
+
+got=$(sim_field STEP4)
+want="acm.GS0 hid.GS0 hid.GS1 hid.GS2 ncm.usb0"
+[ "$got" = "$want" ] && note "step 4 links [$got]" OK \
+                     || note "step 4 links [$got], want [$want]" FAIL
+
+case " $(sim_field STEP4) " in
+    *" uac1.usb0 "*) note "the dropped speaker is still linked after step 4" FAIL ;;
+    *)               note "the dropped speaker is gone after step 4" OK ;;
+esac
+
+missing=""
+for dir in hid.GS0 hid.GS1 hid.GS2
+do
+    case " $(sim_field STEP4) " in
+        *" $dir "*) ;;
+        *) missing="$missing $dir" ;;
+    esac
+done
+[ -z "$missing" ] && note "all three hid functions survive the prune" OK \
+                  || note "the prune removed$missing" FAIL
+
+echo
 echo "===== the budget is the measured constant, not the kernel's ====="
 # dwc2 announces "EPs: 8" and that is not the budget: acm+network is nine
 # endpoints and binds, as does acm+disk+audio. Reading the kernel's number
@@ -232,6 +392,38 @@ if [ -n "$hid_block" ] && ! printf '%s\n' "$hid_block" | grep -q usb_kept; then
     note "HID is gated only on its own marker, never on usb_kept" OK
 else
     note "HID's gate changed, or now depends on usb_kept" FAIL
+fi
+
+# The prune has to be wired in, and it has to run before the link pass - a
+# prune that ran afterwards would remove the links that same start just made.
+# Anchored to the exact indentation and the exact end of the line, so a
+# commented-out loop reports as missing.
+grep -qE '^    for usb_stale in \$\(usb_prune_list "\$usb_keep"\)$' "$SV" \
+    && note "start_usb_dev prunes what the budget dropped" OK \
+    || note "nothing prunes - a dropped function stays linked from an earlier start" FAIL
+
+grep -qE '^        rm -f "configs/c\.1/\$usb_stale"$' "$SV" \
+    && note "the prune unlinks configs/c.1 entries with rm -f" OK \
+    || note "the prune does not rm -f configs/c.1/\$usb_stale" FAIL
+
+prune_line=$(grep -nE '^        rm -f "configs/c\.1/\$usb_stale"$' "$SV" | head -n 1 | cut -d: -f1)
+link_line=$(grep -nE '^ *ln -s functions/' "$SV" | head -n 1 | cut -d: -f1)
+if [ -n "$prune_line" ] && [ -n "$link_line" ] && [ "$prune_line" -lt "$link_line" ]
+then
+    note "the prune runs before the first link" OK
+else
+    note "the prune is at line [$prune_line], the first link at [$link_line]" FAIL
+fi
+
+# The prune loop itself must never reach a function directory. `rmdir
+# functions/acm.GS0` blocks forever on the getty that /etc/inittab respawns on
+# /dev/ttyGS0, and recovery needs a full teardown of the gadget.
+prune_block=$(sed -n '/^    for usb_stale in /,/^    done$/p' "$SV")
+if [ -n "$prune_block" ] && ! printf '%s\n' "$prune_block" | grep -qE 'rmdir|functions/'
+then
+    note "the prune removes symlinks only, never a function directory" OK
+else
+    note "the prune touches functions/ or runs rmdir" FAIL
 fi
 
 # Dropping must not delete the operator's marker: intent has to survive so the

@@ -163,6 +163,59 @@ usb_dropped() {
     echo $out
 }
 
+# usb_gadget_dirs prints the configfs directory names that one optional function
+# can be built as. The network has two, because this script prefers ncm and
+# falls back to rndis, and only one of the two is ever linked.
+#
+# HID is deliberately absent. hid.GS0, hid.GS1 and hid.GS2 are gated on
+# /boot/disable_hid alone and never enter the keep set, so a caller that read
+# the config directory instead of this list would delete the keyboard and both
+# mice from a board that is over budget for an unrelated reason.
+usb_gadget_dirs() {
+    case "$1" in
+        console) echo "acm.GS0" ;;
+        network) echo "ncm.usb0 rndis.usb0" ;;
+        disk)    echo "mass_storage.disk0" ;;
+        audio)   echo "uac1.usb0" ;;
+        *)       echo "" ;;
+    esac
+}
+
+# usb_prune_list prints the configfs directory name of every optional function
+# that the budget did NOT keep. It takes the keep set as its argument.
+#
+# start_usb_dev only ever adds: it makes directories and links them. The gadget
+# survives `stop`, which writes an empty UDC and leaves configs/c.1 exactly as
+# it was, so a function linked by an earlier start stays linked when a later
+# start drops it. Switching the disk off is enough to reach that state on a
+# board with the console, the network and the speaker all enabled: the first
+# start keeps console+disk+audio and leaves the network out, the second keeps
+# console+network and leaves audio out - and the still-linked uac1.usb0 makes
+# ten endpoints of nine. The gadget then refuses to bind and every /dev/hidg*
+# is gone, from one switch in the web UI.
+#
+# This prints names. It removes nothing itself, and the names it prints are bare
+# directory names, never paths. The caller removes the symlink under
+# configs/c.1 and nothing else: `rmdir functions/acm.GS0` blocks forever,
+# because /etc/inittab respawns a getty on /dev/ttyGS0 and the character device
+# always has a holder. Recovering from that wedge needs a full teardown of the
+# gadget, possibly over the same console.
+usb_prune_list() {
+    prune=""
+
+    for name in $(usb_keep_order)
+    do
+        usb_has "$1" "$name" && continue
+
+        for dir in $(usb_gadget_dirs "$name")
+        do
+            prune="$prune $dir"
+        done
+    done
+
+    echo $prune
+}
+
 # usb_report writes one line per dropped function, to the console and to /data,
 # which survives the reboot that a puzzled operator will try first.
 #
@@ -246,6 +299,19 @@ start_usb_dev(){
     usb_kept() {
         usb_has "$usb_keep" "$1"
     }
+
+    # Everything below this point only adds, and `stop` leaves configs/c.1
+    # exactly as it was, so a function linked by an earlier start would survive
+    # a later start that dropped it and put the gadget back over its budget.
+    # Take the stale links out before anything is linked.
+    #
+    # The symlink only. Never rmdir a function directory and never touch
+    # anything under functions/ - see usb_prune_list for why. HID cannot appear
+    # in this list, because usb_prune_list walks the optional functions alone.
+    for usb_stale in $(usb_prune_list "$usb_keep")
+    do
+        rm -f "configs/c.1/$usb_stale"
+    done
 
     # Deterministic gadget MACs from the chip UID so the host-side RNDIS/NCM
     # interface keeps a STABLE MAC across re-enumeration/reboot. Without this

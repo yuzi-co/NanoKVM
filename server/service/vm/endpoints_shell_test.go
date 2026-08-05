@@ -185,6 +185,75 @@ func TestShellAndGoAgreeOnWhatHidCosts(t *testing.T) {
 	}
 }
 
+// shellGadgetDirs pulls the case arms out of usb_gadget_dirs:
+//
+//	network) echo "ncm.usb0 rndis.usb0" ;;
+func shellGadgetDirs(t *testing.T, script string) map[string][]string {
+	t.Helper()
+
+	start := strings.Index(script, "usb_gadget_dirs() {")
+	if start < 0 {
+		t.Fatal("S03usbdev has no usb_gadget_dirs function")
+	}
+
+	end := strings.Index(script[start:], "\n}")
+	if end < 0 {
+		t.Fatal("usb_gadget_dirs is not terminated")
+	}
+
+	arm := regexp.MustCompile(`(?m)^\s*([a-z]+)\)\s*echo\s+"([^"]*)"`)
+	dirs := make(map[string][]string)
+
+	for _, match := range arm.FindAllStringSubmatch(script[start:start+end], -1) {
+		dirs[match[1]] = strings.Fields(match[2])
+	}
+
+	return dirs
+}
+
+// usb_gadget_dirs is what the boot script's prune reads to decide which config
+// symlinks to remove, and the Go table's gadget/gadgetAlt is what the UI reads
+// to decide whether a function is actually running. They are two hand-kept
+// copies of the same names. If the shell copy loses one, the prune stops
+// removing it: a function the budget dropped stays linked from an earlier
+// start, the total goes back over 9, and the gadget refuses to bind with every
+// /dev/hidg* gone - the exact failure this feature exists to prevent.
+func TestShellAndGoAgreeOnEveryGadgetDirectory(t *testing.T) {
+	dirs := shellGadgetDirs(t, readInitScript(t))
+
+	if len(dirs) != len(usbFunctions) {
+		t.Errorf("usb_gadget_dirs names %d functions, the Go table has %d: %v",
+			len(dirs), len(usbFunctions), dirs)
+	}
+
+	for _, function := range usbFunctions {
+		want := []string{function.gadget}
+		if function.gadgetAlt != "" {
+			want = append(want, function.gadgetAlt)
+		}
+
+		shell, ok := dirs[function.name]
+		if !ok {
+			t.Errorf("usb_gadget_dirs has no arm for %q", function.name)
+			continue
+		}
+
+		if !reflect.DeepEqual(shell, want) {
+			t.Errorf("%s is %v in S03usbdev and %v in Go", function.name, shell, want)
+		}
+	}
+
+	// HID is gated on /boot/disable_hid alone and never reaches the keep set,
+	// so a hid.GS* arm here would hand the prune the keyboard and both mice.
+	for name, shell := range dirs {
+		for _, dir := range shell {
+			if strings.HasPrefix(dir, "hid.") {
+				t.Errorf("usb_gadget_dirs maps %q to %q - the prune would unlink a HID function", name, dir)
+			}
+		}
+	}
+}
+
 // Both copies carry the same measured constant. Nothing derives the budget
 // from dmesg or from the kernel at all - it is 9 in Go and 9 in the shell
 // because both were set by hand from the same measurement, and this test is

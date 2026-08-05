@@ -30,10 +30,15 @@ var (
 	// always has a holder, and recovering from that wedge needs a full teardown
 	// of the gadget. Remove the config symlink and nothing else - the same rule
 	// the audio function follows.
+	//
+	// The marker goes with rm -f. /boot is vfat on the SD card and turns
+	// read-only after an error; the loop that runs these stops at the first
+	// nonzero exit, so a bare rm that failed would skip `start` and leave the
+	// board in host mode with no HID and no way back from the UI.
 	unmountConsoleCommands = []string{
 		"/etc/init.d/S03usbdev stop",
 		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/acm.GS0",
-		"rm /boot/usb.acm",
+		"rm -f /boot/usb.acm",
 		"/etc/init.d/S03usbdev start",
 	}
 
@@ -63,10 +68,11 @@ var (
 		"/etc/init.d/S03usbdev start",
 	}
 
+	// The marker goes with rm -f, for the reason the console list records.
 	unmountDiskCommands = []string{
 		"/etc/init.d/S03usbdev stop",
 		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/mass_storage.disk0",
-		"rm /boot/usb.disk0",
+		"rm -f /boot/usb.disk0",
 		"/etc/init.d/S03usbdev start",
 	}
 
@@ -78,11 +84,12 @@ var (
 
 	// The function directory stays. Removing it blocks until every holder of
 	// its character device closes it, and recovering from that needs a full
-	// teardown of the gadget.
+	// teardown of the gadget. The marker goes with rm -f, for the reason the
+	// console list records.
 	unmountAudioCommands = []string{
 		"/etc/init.d/S03usbdev stop",
 		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/uac1.usb0",
-		"rm /boot/usb.uac",
+		"rm -f /boot/usb.uac",
 		"/etc/init.d/S03usbdev start",
 	}
 )

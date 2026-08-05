@@ -1,6 +1,12 @@
 package vm
 
-import "sort"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
 
 // The USB controller has a fixed number of endpoints and every gadget function
 // takes a share of them. Overrunning it does not disable the last function
@@ -34,25 +40,29 @@ const (
 
 // usbFunction is one optional gadget function.
 //
-// device is the name the API accepts for it, and is empty for a function with
-// no toggle. priority decides what survives when more is enabled than fits:
+// device is the name the API accepts to switch it. gadget is the configfs
+// directory that proves the function actually linked; gadgetAlt is a second
+// accepted directory for a function with two forms (the network's NCM and
+// RNDIS). priority decides what survives when more is enabled than fits:
 // higher survives longer.
 type usbFunction struct {
-	name     string
-	device   string
-	markers  []string
-	cost     int
-	priority int
+	name      string
+	device    string
+	markers   []string
+	gadget    string
+	gadgetAlt string
+	cost      int
+	priority  int
 }
 
 // The console outranks everything except HID because it is the only way into a
 // board whose network is gone. Audio is last because it is the only entry that
 // costs nothing to lose.
 var usbFunctions = []usbFunction{
-	{name: "console", device: "console", markers: []string{virtualConsole}, cost: 3, priority: 40},
-	{name: "disk", device: "disk", markers: []string{virtualDisk}, cost: 2, priority: 30},
-	{name: "network", device: "network", markers: []string{virtualNetworkNCM, virtualNetwork}, cost: 3, priority: 20},
-	{name: "audio", device: "audio", markers: []string{virtualAudio}, cost: 1, priority: 10},
+	{name: "console", device: "console", markers: []string{virtualConsole}, gadget: "acm.GS0", cost: 3, priority: 40},
+	{name: "disk", device: "disk", markers: []string{virtualDisk}, gadget: "mass_storage.disk0", cost: 2, priority: 30},
+	{name: "network", device: "network", markers: []string{virtualNetworkNCM, virtualNetwork}, gadget: "ncm.usb0", gadgetAlt: "rndis.usb0", cost: 3, priority: 20},
+	{name: "audio", device: "audio", markers: []string{virtualAudio}, gadget: "uac1.usb0", cost: 1, priority: 10},
 }
 
 // endpointBudget is what the controller fits.
@@ -176,4 +186,58 @@ func canEnable(device string, present func(string) bool) (bool, int, []string) {
 	}
 
 	return false, free, relief
+}
+
+// gadgetConfigPath is where configfs records the functions this gadget carries.
+// A symlink here means the function was built; a marker only means it was
+// asked for, and the two differ whenever the budget dropped something.
+const gadgetConfigPath = "/sys/kernel/config/usb_gadget/g0/configs/c.1"
+
+// active reports whether the function is linked into the running gadget.
+func (f usbFunction) active(linked func(string) bool) bool {
+	if linked(f.gadget) {
+		return true
+	}
+
+	return f.gadgetAlt != "" && linked(f.gadgetAlt)
+}
+
+// isFunctionActive answers the same question against the real configfs.
+func isFunctionActive(name string) bool {
+	for _, function := range usbFunctions {
+		if function.name != name {
+			continue
+		}
+
+		return function.active(func(dir string) bool {
+			_, err := os.Lstat(filepath.Join(gadgetConfigPath, dir))
+			return err == nil
+		})
+	}
+
+	return false
+}
+
+// refusalMessage tells the operator what was refused, how short the budget is,
+// and what would make room. Naming a function that would not free enough is
+// worse than naming none: they turn it off and are refused again.
+func refusalMessage(device string, free int, relief []string) string {
+	wanted, ok := functionForDevice(device)
+	if !ok {
+		return "unknown device"
+	}
+
+	message := fmt.Sprintf("%s needs %d USB endpoints, %d free", device, wanted.cost, free)
+
+	if len(relief) == 0 {
+		return message
+	}
+
+	options := make([]string, 0, len(relief))
+	for _, name := range relief {
+		cost, _ := endpointCost(name)
+		options = append(options, fmt.Sprintf("%s (%d)", name, cost))
+	}
+
+	return message + " — turn off " + strings.Join(options, " or ") + " first"
 }

@@ -64,11 +64,22 @@ type UploadAutostartReq struct {
 	Content string `json:"content"`
 }
 
+// VirtualDeviceState separates what was asked for from what is running. The two
+// differ when the USB controller ran out of endpoints and the boot script gave
+// the function up: the marker is still there, and the function is not.
+type VirtualDeviceState struct {
+	Enabled bool `json:"enabled"`
+	Active  bool `json:"active"`
+	Cost    int  `json:"cost"`
+}
+
 type GetVirtualDeviceRsp struct {
-	Network bool `json:"network"`
-	Media   bool `json:"media"`
-	Disk    bool `json:"disk"`
-	Audio   bool `json:"audio"`
+	Console VirtualDeviceState `json:"console"`
+	Network VirtualDeviceState `json:"network"`
+	Disk    VirtualDeviceState `json:"disk"`
+	Audio   VirtualDeviceState `json:"audio"`
+	Used    int                `json:"used"`
+	Total   int                `json:"total"`
 }
 
 type UpdateVirtualDeviceReq struct {

@@ -19,6 +19,24 @@ const (
 )
 
 var (
+	mountConsoleCommands = []string{
+		"touch /boot/usb.acm",
+		"/etc/init.d/S03usbdev stop",
+		"/etc/init.d/S03usbdev start",
+	}
+
+	// The function directory stays. `rmdir functions/acm.GS0` blocks forever:
+	// /etc/inittab respawns a getty on /dev/ttyGS0, so the character device
+	// always has a holder, and recovering from that wedge needs a full teardown
+	// of the gadget. Remove the config symlink and nothing else - the same rule
+	// the audio function follows.
+	unmountConsoleCommands = []string{
+		"/etc/init.d/S03usbdev stop",
+		"rm -rf /sys/kernel/config/usb_gadget/g0/configs/c.1/acm.GS0",
+		"rm /boot/usb.acm",
+		"/etc/init.d/S03usbdev start",
+	}
+
 	mountNetworkCommands = []string{
 		"touch /boot/usb.rndis0",
 		"/etc/init.d/S03usbdev stop",
@@ -66,6 +84,8 @@ var (
 // It exists so that the mapping can be tested without running anything.
 func commandsFor(device string) (marker string, mount []string, unmount []string, ok bool) {
 	switch device {
+	case "console":
+		return virtualConsole, mountConsoleCommands, unmountConsoleCommands, true
 	case "network":
 		return virtualNetwork, mountNetworkCommands, unmountNetworkCommands, true
 	case "disk":
@@ -80,15 +100,33 @@ func commandsFor(device string) (marker string, mount []string, unmount []string
 func (s *Service) GetVirtualDevice(c *gin.Context) {
 	var rsp proto.Response
 
-	network, _ := isDeviceExist(virtualNetwork)
-	disk, _ := isDeviceExist(virtualDisk)
-	audio, _ := isDeviceExist(virtualAudio)
+	present := func(marker string) bool {
+		exist, _ := isDeviceExist(marker)
+		return exist
+	}
+
+	state := func(device string) proto.VirtualDeviceState {
+		function, ok := functionForDevice(device)
+		if !ok {
+			return proto.VirtualDeviceState{}
+		}
+
+		return proto.VirtualDeviceState{
+			Enabled: function.enabled(present),
+			Active:  isFunctionActive(function.name),
+			Cost:    function.cost,
+		}
+	}
 
 	rsp.OkRspWithData(c, &proto.GetVirtualDeviceRsp{
-		Network: network,
-		Disk:    disk,
-		Audio:   audio,
+		Console: state("console"),
+		Network: state("network"),
+		Disk:    state("disk"),
+		Audio:   state("audio"),
+		Used:    usedEndpoints(present),
+		Total:   endpointBudget(),
 	})
+
 	log.Debugf("get virtual device success")
 }
 
@@ -107,9 +145,22 @@ func (s *Service) UpdateVirtualDevice(c *gin.Context) {
 		return
 	}
 
+	present := func(marker string) bool {
+		exist, _ := isDeviceExist(marker)
+		return exist
+	}
+
 	commands := mount
-	if exist, _ := isDeviceExist(device); exist {
+	if present(device) {
+		// Turning a function off always fits, so it is never checked.
 		commands = unmount
+	} else if ok, free, relief := canEnable(req.Device, present); !ok {
+		// Refuse rather than drop something. A person is here to be told, and
+		// silently switching off what they configured earlier is worse than
+		// declining what they asked for now.
+		log.Infof("refused %s: %d endpoints free", req.Device, free)
+		rsp.ErrRsp(c, -4, refusalMessage(req.Device, free, relief))
+		return
 	}
 
 	h := hid.GetHid()

@@ -81,27 +81,44 @@ narrow the fix to the one instance that happened to be caught.
 The signature still gets captured, as evidence, after the decision is made. See
 "Evidence".
 
-### The guard against a reboot loop is uptime, not a counter
+### Two guards stand against a reboot loop, and they do different jobs
 
 A supervisor that reboots can turn one dead server into an unreachable board.
 Today's failure at least answers SSH forever; a reboot loop does not, and the card
 has to come out.
 
-The guard is a floor on `/proc/uptime`. The board reboots only if it has been up
-longer than `REBOOT_FLOOR`.
+**The latch prevents a cycle.** `should_reboot` refuses unless the probe has
+answered at least once since this boot. A reboot cures a board that worked and
+then broke. It is never a cure for a server that has not answered once, and this
+board carries several faults with exactly that shape: `proto: https` with an
+unreadable certificate panics `server/main.go` on every start, a build that
+skipped `patchelf` will not start, and `S95nanokvm` warns that a copy which runs
+out of space leaves a truncated binary and starts it anyway. All of them leave
+`/tmp/server/NanoKVM-Server` staged and executable, so the verdict is `restart`
+rather than `stopped`, and none of them changes across a reboot.
 
-This works because it follows the physics. A board that runs thirty hours, erodes
-its carveout and then crash-loops has high uptime, so it reboots and gets a fresh
-carveout. A board whose fault returns immediately after that reboot crash-loops at
-low uptime, so it does not reboot again — it stays up and reachable for a person
-to work on, which is exactly what happens today. A leak that refills faster than
-the floor is a leak a reboot cannot cure, and the script correctly refuses to try.
+**The floor sets the period.** A floor on `/proc/uptime` alone cannot prevent a
+cycle: the counters do not survive a reboot, so a fault present from boot rebuilds
+them and escalates again as soon as uptime crosses the floor — every ten and a
+half minutes, for as long as the board has power. What the floor does is keep a
+board that serves briefly after each reboot from cycling fast, and it follows the
+physics: a leak that refills faster than the floor is a leak a reboot cannot cure,
+so the script refuses to try.
 
-It also needs no persistent state, which keeps the script's existing property:
+The board reboots only if `/proc/uptime` is at or above `REBOOT_FLOOR`. Exactly
+600 reboots; the comparison is `-lt` and the suite pins both directions.
+
+Both guards fail closed. A value the comparisons cannot use — an empty `up`
+because `cut` could not fork, a typo in `SUPERVISE_REBOOT_FLOOR` — means `no`.
+`[ "" -lt 600 ]` is an error rather than a false comparison, so a guard that does
+not validate its inputs skips itself exactly when the system is least healthy.
+
+Neither guard needs persistent state, which keeps the script's existing property:
 
 > Telling a crash from a deliberate stop needs no new state.
 
-`/proc/uptime` is already read by `now()`.
+`/proc/uptime` is already read by `now()`, and the latch is a shell variable that
+lives as long as the loop does.
 
 The rejected alternatives were: reboot once per boot (weaker — a board that eroded
 once will erode again in thirty hours, and the second time it just sits dead); a
@@ -147,13 +164,24 @@ seconds `delay_after_run` already uses to mean "the fault was transient".
 
 ### The floor has about twice the margin it needs
 
-Five short runs cost 5, 10, 20, 40 and 60 seconds of backoff — 135 seconds — plus
-the runs themselves, at most 30 seconds each. Worst case is about 4.8 minutes from
-the first crash. Boot takes about 20 seconds. So a board that crash-loops straight
-out of boot reaches the escalation at roughly 5.1 minutes of uptime.
+`ran` does not measure how long a run lasted. `watch_loop` resets `started` on
+every `healthy` poll, so `ran` is the time since the last observation and is about
+`INTERVAL` in every case that matters. `SHORT_RUN` therefore never discriminates
+inside the real loop, and the margin has to be derived from the poll and the
+backoff rather than from the threshold.
 
-A floor of 10 minutes blocks that case with about 2× margin. It is blocked
-firmly, not narrowly.
+The slowest crash loop is a server that lives just under `HANG_AFTER` each time
+without ever answering. Every poll in that window reports `healthy` and resets
+`started`, so the run still counts as short when the process is finally gone. Four
+full cycles separate the first short run from the fifth, and each costs about 55
+seconds of process life plus one poll plus the growing backoff of 5, 10, 20 and 40
+seconds: 65 + 70 + 80 + 100, about 310 seconds. Boot takes about 20 seconds, so
+the worst case reaches the escalation at roughly 5.5 minutes of uptime.
+
+A floor of 10 minutes blocks that case with about 2× margin. The fault this
+feature exists for kills the server in under a second, so `ran` quantises to the
+5-second poll and the fifth short run arrives about 100 seconds in — blocked with
+about six times the margin. Both are blocked firmly, not narrowly.
 
 ## Design
 
@@ -180,15 +208,25 @@ cannot drift from what ships.
 # action frees it, so restarting is a guaranteed-failure loop - 23 attempts over
 # 22 minutes, observed 2026-08-04. A reboot is the only cure.
 #
-# The guard against turning that into a reboot loop is uptime, not a counter.
-# A leak that refills faster than the floor is a leak a reboot cannot cure, so
-# this refuses to try: after one reboot the board comes up, the loop resumes at
-# low uptime, and no second reboot happens. The board stays reachable over ssh
-# for a person to work on, which is what happens today anyway.
+# The latch is what prevents a reboot cycle, and the floor is what sets its
+# period. Both are described above.
 #
 # Every input is passed in. Nothing here reads a clock, a file or a process.
 should_reboot() {
-    verdict=$1; short_runs=$2; failed_cures=$3; up=$4
+    verdict=$1; short_runs=$2; failed_cures=$3; up=$4; served_ever=$5
+
+    if [ "$served_ever" != yes ]; then
+        echo no
+        return
+    fi
+
+    # Fail closed. `[ "" -lt 600 ]` is an error, so the `if` is false and the
+    # floor skips itself on exactly the input that means something went wrong.
+    for num in "$up" "$short_runs" "$failed_cures" \
+               "${REBOOT_FLOOR:-600}" "${CRASH_LOOP_N:-5}" "${HANG_CURES_K:-2}"
+    do
+        case "$num" in ''|*[!0-9]*) echo no; return ;; esac
+    done
 
     if [ "$up" -lt "${REBOOT_FLOOR:-600}" ]; then
         echo no
@@ -221,10 +259,18 @@ the operator asked for it.
 ### How `watch_loop` feeds it
 
 Two counters are added to `watch_loop`, both initialised to 0 beside `delay`:
-`short_runs` and `failed_cures`. A third, `cures`, counts cures attempted.
+`short_runs` and `failed_cures`. A third, `cures`, counts cures attempted. A
+fourth variable, `served_ever`, is a latch rather than a counter: it starts at
+`no`, the poll that answers sets it to `yes`, and nothing ever clears it.
 
-The `healthy` branch resets all three. A server that comes back and serves has
-cleared the fault, whatever it was.
+An answered probe clears all three counters. The verdict name alone is not enough
+— `action` also reports `healthy` for a process that is up and not answering yet
+— so a pure `should_clear` takes both the verdict and whether the probe answered.
+`stopped` does not clear them: the supervisor's own cure removes `/tmp/server` for
+about half a minute, which reports `stopped`, and clearing there wipes the cure
+counters on exactly the slow SD card the fault arrives with. An operator who stops
+the server and brings it back produces an answering `healthy` poll, which clears
+them through the arm that is safe.
 
 The `restart` branch already computes `ran`:
 
@@ -412,7 +458,9 @@ prune_reboot_dirs() {
 | `/data` not mounted | No evidence | `mkdir -p` fails, `capture_evidence` returns 0, the reboot proceeds |
 | `date` unavailable | No evidence directory | Same path as above; the reboot proceeds |
 | Reboot lands on a slot without this script | No supervision on that slot | `S00awatchdog` is the layer below: a boot with no doors open rolls the slot back |
-| Fault returns immediately after the reboot | No second reboot | By design. The board stays up and reachable at low uptime |
+| Fault returns immediately after the reboot | No second reboot | The server has not answered since this boot, so the latch is unset and the decision is `no`. The board stays up and reachable |
+| Fault lets the server answer once, then returns | At most one reboot per boot that served | The latch is set again, so the floor is what limits the rate. This is the case the floor exists for |
+| `/proc/uptime` unreadable, or a threshold misspelt | No reboot | Every value the comparisons touch is validated, and anything that is not a plain non-negative integer means `no` |
 | Operator stops the server | Nothing | `stopped` never escalates |
 
 ## Testing
@@ -423,22 +471,30 @@ prune_reboot_dirs() {
 refuses to run when an extraction comes back empty. `escalate` is added the same
 way. Cases are table-driven, in the style of `decide_case`:
 
-| verdict | short_runs | failed_cures | uptime | want |
-| ------- | ---------- | ------------ | ------ | ---- |
-| restart | 5 | 0 | 3600 | yes |
-| restart | 5 | 0 | 599 | no |
-| restart | 9 | 0 | 0 | no |
-| restart | 4 | 0 | 3600 | no |
-| restart | 0 | 0 | 3600 | no |
-| hung | 0 | 2 | 3600 | yes |
-| hung | 0 | 2 | 599 | no |
-| hung | 0 | 1 | 3600 | no |
-| stopped | 99 | 99 | 3600 | no |
-| healthy | 99 | 99 | 3600 | no |
+| verdict | short_runs | failed_cures | uptime | served_ever | want |
+| ------- | ---------- | ------------ | ------ | ----------- | ---- |
+| restart | 5 | 0 | 3600 | yes | yes |
+| restart | 5 | 0 | 599 | yes | no |
+| restart | 9 | 0 | 0 | yes | no |
+| restart | 4 | 0 | 3600 | yes | no |
+| restart | 0 | 0 | 3600 | yes | no |
+| hung | 0 | 2 | 3600 | yes | yes |
+| hung | 0 | 2 | 599 | yes | no |
+| hung | 0 | 1 | 3600 | yes | no |
+| stopped | 99 | 99 | 3600 | yes | no |
+| healthy | 99 | 99 | 3600 | yes | no |
+| restart | 9 | 0 | 3600 | no | no |
+| hung | 0 | 9 | 3600 | no | no |
+| hung | 0 | 2 | *(empty)* | yes | no |
+| restart | 5 | 0 | `abc` | yes | no |
 
-The counter transitions are tested separately, extracted from `watch_loop`:
-a run of 29s increments `short_runs`, a run of 30s resets it to 0, and a
-`healthy` verdict resets both counters and `cures`.
+The two `served_ever` rows are the ones that would have caught the reboot cycle,
+and the last two are the ones that would have caught the guard failing open.
+
+The counter transitions are tested separately as pure functions: a run of 29s
+increments `short_runs`, a run of 30s resets it to 0, an answered `healthy` poll
+clears the counters, and every other verdict — `stopped` included — leaves them
+alone.
 
 ### Mutation
 
@@ -460,16 +516,28 @@ tests are written in.
 
 Run on the device, with the real binary saved first so the board can be restored.
 
-1. **The escalation fires.** Stage a stub at `/tmp/server/NanoKVM-Server` that
-   exits immediately. Watch `short_runs` climb in `/data/supervise.log`, and watch
-   the reboot happen. Confirm `/data/kvm-diag/reboot-*` holds the evidence, and
-   that `dmesg` and the ION summary are in it.
-2. **The floor blocks it.** Repeat immediately after boot, inside the 10-minute
-   floor. The board must not reboot. This proves the safety property; it is not
-   assumed.
-3. **`SUPERVISE_NO_REBOOT=1` disables it.** The log records the decision and the
+The latch changes how a stub is staged. A stub put in place before the supervisor
+starts produces no escalation at all, because the probe never answered. Start the
+supervisor against the healthy server, let it answer one poll, and stage the stub
+after that — which is also how the 2026-08-04 fault arrived.
+
+1. **`curl` exists.** Without it `serving` returns 0 on every poll, `action` can
+   never return `hung`, and the whole hang half of this feature is inert.
+2. **The hang path runs end to end.** Point `SUPERVISE_URL` at a port nothing
+   listens on, against the real healthy server. This is the only test that
+   reaches `should_clear` across the real `S95nanokvm` re-stage window.
+3. **The escalation fires, with the shipped defaults.** Stage the stub while the
+   supervisor runs and the server has answered. Watch `short_runs` climb in
+   `/data/supervise.log`, and watch the reboot happen. Confirm
+   `/data/kvm-diag/reboot-*` holds the evidence, and that `dmesg` and the ION
+   summary are in it.
+4. **The floor blocks the same run.** Repeat inside the 10-minute floor with
+   `SUPERVISE_NO_REBOOT=1`, changing nothing but the floor. The `would reboot`
+   line from the zero-floor control is the positive control, and its absence here
+   is the proof. This is the safety property; it is not assumed.
+5. **`SUPERVISE_NO_REBOOT=1` disables it.** The log records the decision and the
    board stays up.
-4. **A healthy board is untouched.** Leave the supervisor running normally for at
+6. **A healthy board is untouched.** Leave the supervisor running normally for at
    least one hour with the real binary. No reboot, no new log lines beyond what it
    writes today.
 

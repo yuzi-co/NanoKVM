@@ -234,12 +234,12 @@ echo "===== rebooting, and refusing to ====="
 got=$(WORK="$WORK" sh -c '
     SUPERVISE_NO_REBOOT=1
     NO_REBOOT=1
+    . "$WORK/act.sh"
     log()             { :; }
     capture_bounded() { echo "captured"; }
     sync()            { :; }
     reboot()          { echo "REBOOTED"; }
     sleep()           { :; }
-    . "$WORK/act.sh"
     escalate "test"
 ' | tr '\n' ' ')
 [ "$got" = "" ] && note "SUPERVISE_NO_REBOOT=1 neither captures nor reboots" OK \
@@ -247,12 +247,12 @@ got=$(WORK="$WORK" sh -c '
 
 got=$(WORK="$WORK" sh -c '
     NO_REBOOT=0
+    . "$WORK/act.sh"
     log()             { :; }
     capture_bounded() { echo "captured"; }
     sync()            { echo "synced"; }
     reboot()          { echo "REBOOTED"; }
     sleep()           { :; }
-    . "$WORK/act.sh"
     escalate "test"
 ' | tr '\n' ' ')
 [ "$got" = "captured synced REBOOTED " ] \
@@ -266,9 +266,9 @@ echo "  --- the capture must never be able to block the reboot"
 # reboots, and the guard becomes the fault. Uptime outranks evidence.
 start=$(date +%s)
 WORK="$WORK" sh -c '
+    . "$WORK/act.sh"
     log()              { :; }
     capture_evidence() { sleep 60; }
-    . "$WORK/act.sh"
     capture_bounded "test"
 ' > /dev/null 2>&1
 elapsed=$(( $(date +%s) - start ))
@@ -277,7 +277,7 @@ elapsed=$(( $(date +%s) - start ))
 
 # A reader of /proc/cvitek/vb blocks forever in uninterruptible sleep and cannot
 # be killed. Reading it here would mean the board never reboots at all.
-if grep -q '/proc/cvitek/vb' "$SV"; then
+if grep -v '^[[:space:]]*#' "$SV" | grep -q '/proc/cvitek/vb'; then
     note "the capture reads /proc/cvitek/vb and would wedge the board" FAIL
 else
     note "nothing in the script reads /proc/cvitek/vb" OK

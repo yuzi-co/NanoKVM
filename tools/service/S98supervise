@@ -227,9 +227,9 @@ prune_reboot_dirs() {
     return 0
 }
 
-# Never touch the VB pool debugfs entry. It blocks forever in uninterruptible
-# sleep and the reader cannot be killed, so a capture that touched it would mean
-# the board never reboots at all.
+# Never read /proc/cvitek/vb here. It blocks forever in uninterruptible sleep
+# and the reader cannot be killed, so a capture that touched it would mean the
+# board never reboots at all.
 capture_evidence() {   # $1 = reason
     dir="/data/kvm-diag/reboot-$(date '+%Y%m%d-%H%M%S')"
     mkdir -p "$dir" || return 0
@@ -248,7 +248,6 @@ capture_evidence() {   # $1 = reason
 # Evidence is worth having. Uptime outranks it, so the capture runs detached
 # with a bounded wait and is abandoned if it does not finish.
 capture_bounded() {   # $1 = reason
-    echo "captured"
     capture_evidence "$1" &
     pid=$!
 

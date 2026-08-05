@@ -86,6 +86,20 @@ got=$(WORK="$WORK" sh -c '
 ' ' ')
 [ "$got" = "kill waited restart " ]     && note "SIGKILL, wait for it to go, then the normal restart" OK     || note "order was [$got], want [kill waited restart ]" FAIL
 
+# killall -9 cannot clear uninterruptible sleep. A reader of /proc/cvitek/vb
+# blocks in D state on this board, so the one hang that most needs a reboot is
+# exactly the hang cure_hung cannot fix - and the answer used to be discarded.
+got=$(WORK="$WORK" sh -c '
+    force_kill()   { echo "kill"; }
+    wait_gone()    { echo "waited"; return 1; }
+    full_restart() { echo "restart"; }
+    . "$WORK/cure.sh"
+    cure_hung; echo "rc=$?"
+' | tr '\n' ' ')
+[ "$got" = "kill waited restart rc=1 " ] \
+    && note "a process that will not die still restarts, and says so" OK \
+    || note "order was [$got], want [kill waited restart rc=1 ]" FAIL
+
 echo
 echo "===== the retry delay grows and is capped ====="
 # A binary that can never start must not be retried in a tight loop: that burns
@@ -316,13 +330,26 @@ grep -q '__watch)' "$SV" \
     && note "the entry point setsid re-enters is handled" OK \
     || note "setsid re-enters a subcommand the script does not handle" FAIL
 
-# A wiring check, here because cure_hung was defined and never called while every
-# case above stayed green: it was testable in isolation and unreachable from the
-# loop. Like the setsid check this asserts a string, so the real evidence is the
-# on-device test that wedges the server and watches it come back.
-grep -qE '^[[:space:]]+cure_hung$' "$SV" \
+# cure_hung was once defined and never called while every case above stayed
+# green: testable in isolation, unreachable from the loop. The same trap applies
+# to everything this file extracts, so each new decision gets a wiring check too.
+# Like the setsid check these assert a string, so the real evidence is the
+# on-device test that crash-loops the server and watches the board come back.
+grep -qE '^[[:space:]]+if cure_hung; then$' "$SV" \
     && note "the hang branch actually calls cure_hung" OK \
     || note "cure_hung is defined but never reached" FAIL
+grep -qE 'should_reboot restart' "$SV" \
+    && note "the restart branch actually asks should_reboot" OK \
+    || note "should_reboot is defined but no crash loop reaches it" FAIL
+grep -qE 'should_reboot hung' "$SV" \
+    && note "the hang branch actually asks should_reboot" OK \
+    || note "should_reboot is defined but no hang reaches it" FAIL
+grep -qE '^[[:space:]]+escalate ' "$SV" \
+    && note "something actually calls escalate" OK \
+    || note "escalate is defined and never called" FAIL
+grep -qE 'next_short_runs|next_failed_cures' "$SV" \
+    && note "the counters are read by the loop" OK \
+    || note "the counters are defined and never used" FAIL
 
 echo
 if [ "$fails" -eq 0 ]; then

@@ -225,6 +225,58 @@ Both scripts detach with `setsid`. Redirecting a background loop's stdio to
 `S98supervise start` printed its line and then held the session open until the
 client gave up after five minutes.
 
+### When restarting cannot work
+
+The supervisor restarts the server and does not reboot the board. That is right
+for a hung server. It is wrong for an exhausted ION carveout: the allocation is
+leaked inside the kernel modules, `rmmod soph_vpss` answers `Resource
+temporarily unavailable` with zero processes running, and no userspace action
+frees it. On 2026-08-04 the supervisor restarted a dead server 23 times over 22
+minutes, and it would have continued indefinitely.
+
+The supervisor now reboots the board in two cases:
+
+| Case | Condition |
+| ---- | --------- |
+| Crash loop | 5 consecutive runs shorter than 30 seconds |
+| Unrecoverable hang | 2 cures that did not restore service, or one process that did not die from SIGKILL |
+
+The trigger is blind. It counts failures and never reads `dmesg` to decide,
+because the ring buffer holds about eight crashes and rolls within ten minutes:
+a signature would get weaker exactly as the fault got worse.
+
+A floor on uptime prevents a reboot loop. The board reboots only if it has been
+up for more than 10 minutes. A board that crash-loops out of boot reaches the
+escalation at roughly five minutes, so that case is blocked with about twice the
+margin it needs. The consequence is deliberate: if the fault returns immediately
+after the reboot, no second reboot happens and the board stays reachable over
+ssh. A leak that refills faster than the floor is a leak a reboot cannot cure.
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `SUPERVISE_REBOOT_FLOOR` | 600 | Seconds of uptime below which it never reboots |
+| `SUPERVISE_SHORT_RUN` | 30 | A run shorter than this counts toward a crash loop |
+| `SUPERVISE_CRASH_LOOP_N` | 5 | Consecutive short runs that trigger a reboot |
+| `SUPERVISE_HANG_CURES` | 2 | Failed cures that trigger a reboot |
+| `SUPERVISE_NO_REBOOT` | 0 | Set to 1 to log the decision and not act on it |
+
+Before it reboots, the supervisor writes `/data/kvm-diag/reboot-<stamp>/` with
+the reason, `dmesg`, the tail of the server log, the tail of its own log,
+`/proc/uptime`, `/proc/meminfo` and the ION carveout summary. Three of these
+directories are kept. The capture runs detached and is abandoned after ten
+seconds, because a capture that wedges would mean the board never reboots.
+
+Nothing in the capture reads `/proc/cvitek/vb`. That file blocks forever in
+uninterruptible sleep and the reader cannot be killed.
+
+```shell
+sh tools/service/test-supervise.sh            # the decisions
+sh tools/service/test-supervise-mutation.sh   # proves those cases can fail
+```
+
+Run both on the board as well as on a workstation. busybox `ash` is not the
+shell the tests were written in.
+
 ## Recovering a board that will not boot
 
 Check which of these your enclosure actually gives you before you need one. On

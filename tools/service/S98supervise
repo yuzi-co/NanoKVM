@@ -200,9 +200,14 @@ next_failed_cures() {   # $1 = cures attempted so far, $2 = current count
 # port 80 and the replacement could not bind, so the hang would survive its own
 # cure. SIGKILL first, wait for the process to actually go, then use the normal
 # restart path so /tmp is re-staged and kvm_system comes with it.
+#
+# wait_gone's answer used to be discarded. A process in uninterruptible sleep
+# does not die from SIGKILL - a reader of /proc/cvitek/vb blocks in D state on
+# this board - so the one hang that most needs a reboot is exactly the hang this
+# cannot fix. The restart still happens either way; the caller is told.
 cure_hung() {
     force_kill
-    wait_gone
+    wait_gone || { full_restart; return 1; }
     full_restart
 }
 # --- end cure ---
@@ -376,6 +381,14 @@ watch_loop() {
     started=$(now)
     LAST_OK=$(now)
 
+    # short_runs and failed_cures are what should_reboot judges. cures counts
+    # attempts, so a hung verdict can tell "the first hang" from "the cure did
+    # not work". A server that comes back and serves clears all three: whatever
+    # the fault was, it is over.
+    short_runs=0
+    failed_cures=0
+    cures=0
+
     while :; do
         sleep "$INTERVAL"
 
@@ -384,12 +397,30 @@ watch_loop() {
         case "$(action)" in
             healthy)
                 started=$(now)
+                short_runs=0
+                failed_cures=0
+                cures=0
                 ;;
 
             hung)
                 stuck=$(unhealthy_for)
                 log "NanoKVM-Server is up but has not answered for ${stuck}s, killing and restarting it"
-                cure_hung
+
+                failed_cures=$(next_failed_cures "$cures" "$failed_cures")
+
+                if cure_hung; then
+                    cures=$(( cures + 1 ))
+                else
+                    # SIGKILL cannot clear uninterruptible sleep, and no later
+                    # cure does better. Go straight to the threshold.
+                    log "the process did not leave after SIGKILL"
+                    failed_cures=${HANG_CURES_K:-2}
+                fi
+
+                if [ "$(should_reboot hung 0 "$failed_cures" "$(now)")" = yes ]; then
+                    escalate "hung: $failed_cures cures did not restore service"
+                fi
+
                 # Give it room to come up before judging again, or a slow start
                 # would be read as another hang.
                 sleep 30
@@ -401,7 +432,13 @@ watch_loop() {
                 ;;
             restart)
                 ran=$(( $(now) - started ))
+                short_runs=$(next_short_runs "$ran" "$short_runs")
                 log "NanoKVM-Server is gone after ${ran}s, restarting in ${delay}s"
+
+                if [ "$(should_reboot restart "$short_runs" 0 "$(now)")" = yes ]; then
+                    escalate "crash loop: $short_runs runs shorter than ${SHORT_RUN:-30}s"
+                fi
+
                 sleep "$delay"
 
                 # Check again: a restart in progress may have started it while

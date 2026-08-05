@@ -17,11 +17,13 @@ sed -n '/^# --- backoff ---$/,/^# --- end backoff ---$/p' "$SV" > "$WORK/backoff
 sed -n '/^# --- cure ---$/,/^# --- end cure ---$/p'       "$SV" > "$WORK/cure.sh"
 sed -n '/^# --- escalate ---$/,/^# --- end escalate ---$/p' "$SV" > "$WORK/escalate.sh"
 sed -n '/^# --- count ---$/,/^# --- end count ---$/p' "$SV" > "$WORK/count.sh"
+sed -n '/^# --- act ---$/,/^# --- end act ---$/p' "$SV" > "$WORK/act.sh"
 [ -s "$WORK/decide.sh" ]  || { echo "could not extract the decide block"; exit 1; }
 [ -s "$WORK/backoff.sh" ] || { echo "could not extract the backoff block"; exit 1; }
 [ -s "$WORK/cure.sh" ]    || { echo "could not extract the cure block"; exit 1; }
 [ -s "$WORK/escalate.sh" ] || { echo "could not extract the escalate block"; exit 1; }
 [ -s "$WORK/count.sh" ] || { echo "could not extract the count block"; exit 1; }
+[ -s "$WORK/act.sh" ] || { echo "could not extract the act block"; exit 1; }
 
 fails=0
 note() { printf '  %-60s %s\n' "$1" "$2"; [ "$2" = FAIL ] && fails=$((fails + 1)); return 0; }
@@ -224,6 +226,77 @@ cures_case() {
 cures_case "the first hang, nothing tried yet"  0 0 0
 cures_case "hung again after one cure"          1 0 1
 cures_case "hung again after two cures"         2 1 2
+
+echo
+echo "===== rebooting, and refusing to ====="
+# SUPERVISE_NO_REBOOT exists for the hardware test and for an operator who wants
+# to leave a board in its failed state to investigate it.
+got=$(WORK="$WORK" sh -c '
+    SUPERVISE_NO_REBOOT=1
+    NO_REBOOT=1
+    log()             { :; }
+    capture_bounded() { echo "captured"; }
+    sync()            { :; }
+    reboot()          { echo "REBOOTED"; }
+    sleep()           { :; }
+    . "$WORK/act.sh"
+    escalate "test"
+' | tr '\n' ' ')
+[ "$got" = "" ] && note "SUPERVISE_NO_REBOOT=1 neither captures nor reboots" OK \
+                || note "SUPERVISE_NO_REBOOT=1 did [$got], want nothing" FAIL
+
+got=$(WORK="$WORK" sh -c '
+    NO_REBOOT=0
+    log()             { :; }
+    capture_bounded() { echo "captured"; }
+    sync()            { echo "synced"; }
+    reboot()          { echo "REBOOTED"; }
+    sleep()           { :; }
+    . "$WORK/act.sh"
+    escalate "test"
+' | tr '\n' ' ')
+[ "$got" = "captured synced REBOOTED " ] \
+    && note "evidence is captured and synced before the reboot" OK \
+    || note "order was [$got], want [captured synced REBOOTED ]" FAIL
+
+echo
+echo "  --- the capture must never be able to block the reboot"
+# /tmp does not survive a reboot and dmesg rolls within ten minutes, so evidence
+# not taken here is gone. But a capture that wedges means the board never
+# reboots, and the guard becomes the fault. Uptime outranks evidence.
+start=$(date +%s)
+WORK="$WORK" sh -c '
+    log()              { :; }
+    capture_evidence() { sleep 60; }
+    . "$WORK/act.sh"
+    capture_bounded "test"
+' > /dev/null 2>&1
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 20 ] && note "a wedged capture is abandoned after ~10s (took ${elapsed}s)" OK \
+                      || note "a wedged capture held the reboot for ${elapsed}s" FAIL
+
+# A reader of /proc/cvitek/vb blocks forever in uninterruptible sleep and cannot
+# be killed. Reading it here would mean the board never reboots at all.
+if grep -q '/proc/cvitek/vb' "$SV"; then
+    note "the capture reads /proc/cvitek/vb and would wedge the board" FAIL
+else
+    note "nothing in the script reads /proc/cvitek/vb" OK
+fi
+
+echo
+echo "  --- /data is on the SD card, so the evidence is capped"
+got=$(WORK="$WORK" sh -c '
+    d=$(mktemp -d)
+    mkdir -p "$d/kvm-diag"
+    for s in 01 02 03 04 05; do mkdir -p "$d/kvm-diag/reboot-2026080$s-000000"; done
+    . "$WORK/act.sh"
+    cd "$d/kvm-diag" || exit 1
+    prune_reboot_dirs
+    ls -d "$d"/kvm-diag/reboot-* 2>/dev/null | wc -l
+    rm -rf "$d"
+')
+[ "$got" = "3" ] && note "five reboot directories are pruned to 3" OK \
+                 || note "pruning left $got directories, want 3" FAIL
 
 echo
 echo "===== the script still parses ====="

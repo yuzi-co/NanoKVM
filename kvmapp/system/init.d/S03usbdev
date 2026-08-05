@@ -1,6 +1,188 @@
 #!/bin/sh
 # kvmhwd Rev2.2
 
+# --- endpoint budget ---
+# The USB controller has a fixed number of endpoints, and every function takes a
+# share. Overrunning it does not disable the newest function: the whole gadget
+# refuses to bind, so /dev/hidg* never appear and the keyboard and both mice are
+# gone. The kernel names whichever function was linked last, not the one that
+# overran, so the message points at the wrong thing.
+#
+# Seen on 2026-08-04 with the console, the disk, the network and the speaker all
+# switched on - twelve endpoints asked of eight:
+#
+#   configfs-gadget gadget: acm/000000000223f9a0: can't bind, err -19
+#   configfs-gadget 4340000.usb: failed to start g0: -19
+#
+# So count first and link second. When more is enabled than fits, give up the
+# lower priority function its place: nobody is present at boot to be asked, and coming up
+# without a keyboard is the worst available outcome.
+#
+# Never delete the marker of a function that is given up. The operator's intent
+# stays on disk, so switching something else off brings it back on its own.
+
+# usb_marker exists so the tests can redirect the lookup away from /boot.
+usb_marker() {
+    [ -e "/boot/$1" ]
+}
+
+# usb_budget is how many endpoints of functions this controller fits.
+#
+# The number is measured, not read. dwc2 prints its own count a few seconds
+# before this script runs:
+#
+#   dwc2 4340000.usb: EPs: 8, dedicated fifos, 3072 entries in SPRAM
+#
+# That is not the budget. Configurations totalling nine endpoints bind and work
+# - acm+network, acm+disk+audio, and disk+network+audio, each with all three
+# HID functions - and ten fails. Parsing the kernel's line looks like the
+# careful thing to do and would permanently refuse two configurations that are
+# known good, with a comment claiming it read the real value from the hardware.
+#
+# Leave this as a constant. If a future controller differs, measure it the same
+# way and change the number here.
+usb_budget() {
+    echo 9
+}
+
+# usb_hid_cost charges nothing when HID is switched off, because those endpoints
+# are then genuinely free and functions that fit would otherwise be refused.
+usb_hid_cost() {
+    if usb_marker disable_hid
+    then
+        echo 0
+    else
+        echo 3
+    fi
+}
+
+usb_cost() {
+    case "$1" in
+        console) echo 3 ;;
+        network) echo 3 ;;
+        disk)    echo 2 ;;
+        audio)   echo 1 ;;
+        *)       echo 0 ;;
+    esac
+}
+
+# usb_keep_order lists the optional functions highest priority first, which is
+# the order they are offered a place.
+#
+# The console ranks above the disk and the network because it is the only way
+# into a board whose network is gone. Audio ranks last: it is the only entry
+# that costs nothing to lose.
+usb_keep_order() {
+    echo "console disk network audio"
+}
+
+# usb_drop_order is the same ranking read backwards. It is what the Go copy of
+# the table is compared against, and a test asserts the two are exact reverses.
+usb_drop_order() {
+    echo "audio network disk console"
+}
+
+# usb_enabled prints the functions the markers ask for. usb.ncm and usb.rndis0
+# are alternatives for one function, so they produce one name, not two.
+usb_enabled() {
+    set=""
+
+    usb_marker usb.acm && set="$set console"
+    { usb_marker usb.ncm || usb_marker usb.rndis0; } && set="$set network"
+    usb_marker usb.disk0 && set="$set disk"
+    usb_marker usb.uac && set="$set audio"
+
+    echo $set
+}
+
+usb_used() {
+    used=$(usb_hid_cost)
+
+    for name in $1
+    do
+        used=$((used + $(usb_cost "$name")))
+    done
+
+    echo "$used"
+}
+
+# usb_has answers whether a name is in a set.
+usb_has() {
+    case " $1 " in
+        *" $2 "*) return 0 ;;
+    esac
+
+    return 1
+}
+
+# usb_resolve prints the subset of the enabled set that fits the budget.
+#
+# It offers each function a place in priority order and keeps the ones that
+# still fit, rather than giving up the lowest priority members until the total
+# comes down. The two agree on which function outranks which and disagree on
+# the result: with everything enabled, giving up in order loses audio, then the
+# network, and settles on console+disk at five of the six optional endpoints -
+# while console+disk+audio is exactly six and keeps one function more. Offering
+# places never leaves room unused, and it cannot promote a lower priority
+# function over a higher one, because the higher one was offered first.
+#
+# It always terminates: the list is finite and each entry is considered once. A
+# budget too small for anything optional simply yields an empty set.
+usb_resolve() {
+    enabled=$1
+    budget=$2
+
+    keep=""
+
+    for name in $(usb_keep_order)
+    do
+        usb_has "$enabled" "$name" || continue
+
+        if [ "$(usb_used "$keep $name")" -le "$budget" ]
+        then
+            keep="$keep $name"
+        fi
+    done
+
+    echo $keep
+}
+
+# usb_dropped prints what the resolve gave up, for the log.
+usb_dropped() {
+    out=""
+
+    for name in $1
+    do
+        case " $2 " in
+            *" $name "*) ;;
+            *) out="$out $name" ;;
+        esac
+    done
+
+    echo $out
+}
+
+# usb_report writes one line per dropped function, to the console and to /data,
+# which survives the reboot that a puzzled operator will try first.
+#
+# The /data write is guarded. This script runs early in boot, and a board where
+# that mount has not appeared yet would otherwise print a redirection error over
+# the message it is trying to deliver. The console line is the one that must
+# always work.
+usb_report() {
+    for name in $1
+    do
+        message="usb: not enough endpoints, $name is off (needs $(usb_cost "$name"))"
+        echo "$message"
+
+        if [ -d /data ]
+        then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') $message" >> /data/usb-endpoints.log 2>/dev/null
+        fi
+    done
+}
+# --- end endpoint budget ---
+
 start_usb_dev(){
     . /etc/profile
     echo "usb mode: device"
@@ -51,6 +233,19 @@ start_usb_dev(){
     mkdir configs/c.1/strings/0x409
     echo "NanoKVM" >  configs/c.1/strings/0x409/configuration
 
+    # Decide what fits before anything is linked. Everything below tests
+    # usb_keep rather than the marker, so a function that lost its place is
+    # simply not built - its marker is untouched and it returns on its own
+    # when something else is switched off.
+    usb_wanted=$(usb_enabled)
+    usb_keep=$(usb_resolve "$usb_wanted" "$(usb_budget)")
+    usb_report "$(usb_dropped "$usb_wanted" "$usb_keep")"
+
+    # usb_kept answers whether a function survived the budget.
+    usb_kept() {
+        usb_has "$usb_keep" "$1"
+    }
+
     # Deterministic gadget MACs from the chip UID so the host-side RNDIS/NCM
     # interface keeps a STABLE MAC across re-enumeration/reboot. Without this
     # the kernel assigns a random dev_addr/host_addr on every bind, so the
@@ -62,7 +257,7 @@ start_usb_dev(){
         usb_host_mac="48:da:35:6d:${usb_uid%??}:${usb_uid#??}"
     fi
 
-    if [ -e /boot/usb.ncm ]
+    if usb_kept network && [ -e /boot/usb.ncm ]
     then
         mkdir functions/ncm.usb0
         [ -n "$usb_dev_mac" ]  && echo "$usb_dev_mac"  > functions/ncm.usb0/dev_addr
@@ -70,7 +265,7 @@ start_usb_dev(){
         echo WINNCM > functions/ncm.usb0/os_desc/interface.ncm/compatible_id
         ln -s functions/ncm.usb0 configs/c.1/
     else
-        if [ -e /boot/usb.rndis0 ]
+        if usb_kept network && [ -e /boot/usb.rndis0 ]
         then
                 mkdir functions/rndis.usb0
                 [ -n "$usb_dev_mac" ]  && echo "$usb_dev_mac"  > functions/rndis.usb0/dev_addr
@@ -84,7 +279,7 @@ start_usb_dev(){
         fi
     fi
 
-    if [ -e /boot/usb.ncm ] || [ -e /boot/usb.rndis0 ]
+    if usb_kept network
     then
         # Microsoft OS 2.0 Descriptor
         echo 1 > os_desc/use
@@ -135,7 +330,7 @@ start_usb_dev(){
         ln -s functions/hid.GS2 configs/c.1
     fi
 
-    if [ -e /boot/usb.disk0 ]
+    if usb_kept disk
     then
             mkdir functions/mass_storage.disk0
             ln -s functions/mass_storage.disk0 configs/c.1/
@@ -178,7 +373,7 @@ start_usb_dev(){
     # Add it last. configfs numbers interfaces in link order, so a function
     # inserted ahead of the HID ones renumbers the keyboard and the mice under a
     # host that is already bound to them.
-    if [ -e /boot/usb.acm ]
+    if usb_kept console
     then
         mkdir functions/acm.GS0
         ln -s functions/acm.GS0 configs/c.1
@@ -191,7 +386,7 @@ start_usb_dev(){
     # linked into the config. A function inserted ahead of the HID ones would
     # renumber the keyboard and the mice under a host that is already bound to
     # them.
-    if [ -e /boot/usb.uac ]
+    if usb_kept audio
     then
         mkdir functions/uac1.usb0
 

@@ -38,21 +38,50 @@ func NewWebRTCManager() *WebRTCManager {
 			rtp.NewRandomSequencer(),
 			clockRate,
 		),
+		audioPacketizer: rtp.NewPacketizer(
+			rtpMTU,
+			audioPayloadType,
+			audioSSRC,
+			&codecs.G711Payloader{},
+			rtp.NewRandomSequencer(),
+			audioClockRate,
+		),
 	}
 	m.updateClientSnapshotLocked()
 
 	return m
 }
 
-func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
-	go client.write()
-
+// storeClient records the client and reports whether it is new to the
+// manager's map. The bool is bookkeeping only now: it does not gate the
+// writer start, because a reconnect reuses the same *Client after
+// RemoveClient deleted its map entry, and the map alone cannot tell that
+// apart from a client the manager has never seen. See Client.startWriters.
+func (m *WebRTCManager) storeClient(ws *websocket.Conn, client *Client) (int, uint64, bool) {
 	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	_, exists := m.clients[ws]
 	m.clients[ws] = client
+
 	count := m.updateClientSnapshotLocked()
 	m.viewerVersion++
-	version := m.viewerVersion
-	m.mutex.Unlock()
+
+	return count, m.viewerVersion, !exists
+}
+
+func (m *WebRTCManager) AddClient(ws *websocket.Conn, client *Client) {
+	count, version, _ := m.storeClient(ws, client)
+
+	// The writer-start guard lives on the Client, not here: ICE reaches
+	// Connected and then Completed for one handshake, and can also flap
+	// Connected -> Disconnected -> Connected on a blip, and signalling calls
+	// AddClient on all of them, sometimes with the same *Client after
+	// RemoveClient already closed its slots. Starting the writers twice would
+	// put two goroutines on one slot, and the second close of the done
+	// channel panics the server.
+	client.startWriters()
+
 	vm.UpdateHdmiViewerSnapshot("webrtc", count, version)
 
 	log.Debugf("added client %s, total clients: %d", ws.RemoteAddr(), count)
@@ -71,6 +100,8 @@ func (m *WebRTCManager) RemoveClient(ws *websocket.Conn) {
 	if exists {
 		client.stop()
 	}
+
+	m.stopAudioStreamIfIdle()
 
 	log.Debugf("removed client %s, total clients: %d", ws.RemoteAddr(), count)
 }

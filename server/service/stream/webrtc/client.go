@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"NanoKVM-Server/service/stream"
+	"NanoKVM-Server/service/stream/audio"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
@@ -14,11 +15,13 @@ import (
 
 func NewClient(ws *websocket.Conn, videoConn *webrtc.PeerConnection) *Client {
 	return &Client{
-		ws:    ws,
-		video: videoConn,
-		mutex: sync.Mutex{},
-		slot:  stream.NewFrameSlot[[]*rtp.Packet](),
-		done:  make(chan struct{}),
+		ws:        ws,
+		video:     videoConn,
+		mutex:     sync.Mutex{},
+		slot:      stream.NewFrameSlot[[]*rtp.Packet](),
+		done:      make(chan struct{}),
+		audioSlot: stream.NewFrameSlot[[]*rtp.Packet](),
+		audioDone: make(chan struct{}),
 	}
 }
 
@@ -38,6 +41,51 @@ func (c *Client) enqueue(packets []*rtp.Packet, isKeyFrame bool) {
 	}
 
 	c.waitingForKeyFrame = false
+}
+
+// enqueueAudio offers a frame to this client and never blocks.
+//
+// Unlike video, audio has no keyframe to recover from a gap, so the newest
+// frame replaces whatever is pending rather than being dropped.
+func (c *Client) enqueueAudio(packets []*rtp.Packet) {
+	c.audioSlot.Replace(packets)
+}
+
+// hasAudioTrack reports whether this client negotiated audio. A client that
+// connected while the gadget had no capture card did not.
+func (c *Client) hasAudioTrack() bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	return c.track != nil && c.track.audio != nil
+}
+
+// writeAudio drains the audio slot until it is closed or the connection fails.
+func (c *Client) writeAudio() {
+	defer close(c.audioDone)
+
+	for {
+		packets, ok := c.audioSlot.Take()
+		if !ok {
+			return
+		}
+
+		c.mutex.Lock()
+		track := c.track
+		c.mutex.Unlock()
+
+		if track == nil || track.audio == nil {
+			continue
+		}
+
+		if err := track.writeAudioPackets(packets); err != nil {
+			log.Debugf("audio write to %s failed: %s", c.ws.RemoteAddr(), err)
+
+			c.Close()
+
+			return
+		}
+	}
 }
 
 // write drains the slot until it is closed or the connection fails. It is the
@@ -71,13 +119,29 @@ func (c *Client) write() {
 	}
 }
 
+// startWriters starts write and writeAudio at most once for this client's
+// lifetime, no matter how many times AddClient runs for it.
+func (c *Client) startWriters() {
+	c.writersOnce.Do(func() {
+		go c.write()
+		go c.writeAudio()
+	})
+}
+
 // stop releases the writer and waits for it to let go of the connection.
 func (c *Client) stop() {
 	c.slot.Close()
 	<-c.done
 
+	c.audioSlot.Close()
+	<-c.audioDone
+
 	if dropped := c.slot.Dropped(); dropped > 0 {
 		log.Debugf("h264 client dropped %d frames", dropped)
+	}
+
+	if dropped := c.audioSlot.Dropped(); dropped > 0 {
+		log.Debugf("audio client dropped %d frames", dropped)
 	}
 }
 
@@ -148,8 +212,37 @@ func (c *Client) AddTrack() error {
 	}
 	go startRTCPReader(videoSender)
 
+	track := &Track{video: videoTrack}
+
+	// The card comes and goes with the settings switch, so this is decided per
+	// connection rather than once at start.
+	if audio.Available() {
+		audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+			webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypePCMU,
+				ClockRate: audioClockRate,
+				Channels:  1,
+			},
+			"audio",
+			"pion-audio",
+		)
+		if err != nil {
+			log.Errorf("failed to create audio track: %s", err)
+			return err
+		}
+
+		audioSender, err := c.video.AddTrack(audioTrack)
+		if err != nil {
+			log.Errorf("failed to add audio track: %s", err)
+			return err
+		}
+		go startRTCPReader(audioSender)
+
+		track.audio = audioTrack
+	}
+
 	c.mutex.Lock()
-	c.track = &Track{video: videoTrack}
+	c.track = track
 	c.mutex.Unlock()
 
 	return nil

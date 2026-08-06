@@ -22,6 +22,11 @@
 # Environment:
 #   SUPERVISE_INTERVAL   seconds between checks   (default 5)
 #   SUPERVISE_LOG        where events go          (default /data/supervise.log)
+#   SUPERVISE_REBOOT_FLOOR  uptime below which it never reboots  (default 600)
+#   SUPERVISE_SHORT_RUN     a run shorter than this counts       (default 30)
+#   SUPERVISE_CRASH_LOOP_N  short runs that trigger a reboot     (default 5)
+#   SUPERVISE_HANG_CURES    failed cures that trigger a reboot   (default 2)
+#   SUPERVISE_NO_REBOOT     1 logs the decision and does not act (default 0)
 
 INTERVAL=${SUPERVISE_INTERVAL:-5}
 # Seconds a process may be alive and not answering before it counts as hung. A
@@ -32,6 +37,15 @@ HANG_AFTER=${SUPERVISE_HANG_AFTER:-60}
 HEALTH_URL=${SUPERVISE_URL:-http://127.0.0.1/}
 LOG=${SUPERVISE_LOG:-/data/supervise.log}
 PIDFILE=/tmp/supervise.pid
+
+# Escalation thresholds. Each takes an environment override in the same style as
+# INTERVAL and HANG_AFTER above, and each default is repeated at the point of use
+# so an extracted block measures the value that ships.
+REBOOT_FLOOR=${SUPERVISE_REBOOT_FLOOR:-600}
+SHORT_RUN=${SUPERVISE_SHORT_RUN:-30}
+CRASH_LOOP_N=${SUPERVISE_CRASH_LOOP_N:-5}
+HANG_CURES_K=${SUPERVISE_HANG_CURES:-2}
+NO_REBOOT=${SUPERVISE_NO_REBOOT:-0}
 
 SERVER_BIN=${SERVER_BIN:-/tmp/server/NanoKVM-Server}
 SYSTEM_BIN=${SYSTEM_BIN:-/tmp/kvm_system/kvm_system}
@@ -75,7 +89,15 @@ log() {
 # those is worth killing a working KVM for.
 action() {
     if process_running; then
-        if serving; then
+        serving
+        answered=$?
+
+        # Anything but a clear "no" counts as serving. A probe that cannot run
+        # is not evidence that the server is down, and killing a working KVM
+        # because curl is missing is the worst trade this script can make: it
+        # would report hung on every poll and restart a healthy server once a
+        # minute, forever.
+        if [ "$answered" -ne 1 ]; then
             echo healthy
             return
         fi
@@ -100,18 +122,259 @@ action() {
 }
 # --- end decide ---
 
+# --- escalate ---
+# The cures above assume the fault is in the process. Some faults are not: an
+# exhausted ION carveout is leaked inside the kernel modules, and `rmmod
+# soph_vpss` answers `Resource temporarily unavailable` with zero processes
+# running. No userspace action frees it, so restarting is a guaranteed-failure
+# loop. Only a reboot clears it, and that reboot is clean - the board came back
+# in about ten seconds with HID, the ACM console and the UAC1 card all present.
+#
+# The trigger is blind. It counts failures and never reads dmesg to decide.
+# The ring buffer holds about eight crashes and rolls within ten minutes, so a
+# signature-gated guard would get weaker exactly as the fault got worse. A
+# reboot is also the right cure for any cause a fresh boot clears - a leaked
+# carveout, a wedged driver, a stuck VB pool - and naming one of them would
+# narrow the fix to the instance that happened to be caught. The signature is
+# still captured afterwards, as evidence rather than as a gate.
+#
+# Two guards stand between this and a reboot loop, and they do different jobs.
+#
+# The latch is the one that prevents a cycle. A floor on uptime only sets its
+# period: a fault that is present from boot keeps producing restart or hung
+# verdicts while the floor blocks them, the counters do not survive a reboot,
+# and the moment uptime crosses the floor the same sequence escalates again -
+# every ten and a half minutes, for as long as the board has power. A reboot
+# cures a board that worked and then broke. It is never a cure for a server that
+# has not answered once since this boot, and this board has several faults with
+# exactly that shape: `proto: https` with an unreadable certificate, a build that
+# skipped patchelf, a copy that ran out of space on the SD card. Each leaves the
+# binary staged and executable, so the verdict is restart rather than stopped,
+# and each survives a reboot unchanged.
+#
+# The floor is still worth having on top of it. A board that serves, breaks and
+# is rebooted can serve again briefly before the fault returns, and the floor is
+# what keeps that from becoming a fast cycle. It also follows the physics: a leak
+# that refills faster than the floor is a leak a reboot cannot cure, so this
+# refuses to try. Neither guard needs state on disk, which keeps the property the
+# rest of this script has - telling one state from another needs no new file.
+#
+# Every input is passed in. Nothing here reads a clock, a file or a process.
+should_reboot() {
+    verdict=$1; short_runs=$2; failed_cures=$3; up=$4; served_ever=$5
+
+    if [ "$served_ever" != yes ]; then
+        echo no
+        return
+    fi
+
+    # Fail closed on anything that is not a plain non-negative integer. `[ ""
+    # -lt 600 ]` is an error rather than a false comparison: the `if` is false,
+    # the floor is skipped, and the board reboots at whatever uptime it has -
+    # thirty seconds included. A guard that inverts its own meaning on bad input
+    # is not a guard. `up` comes from `cut -d. -f1 /proc/uptime`, so any failure
+    # to fork gives an empty string, and a typo in SUPERVISE_REBOOT_FLOOR opens
+    # the same hole from the other side.
+    #
+    # The floor is the comparison whose failure is dangerous; a bad short_runs
+    # or CRASH_LOOP_N errors into the safe answer already. They are checked
+    # anyway, so this function has one rule rather than a rule and an exception.
+    for num in "$up" "$short_runs" "$failed_cures" \
+               "${REBOOT_FLOOR:-600}" "${CRASH_LOOP_N:-5}" "${HANG_CURES_K:-2}"
+    do
+        case "$num" in ''|*[!0-9]*) echo no; return ;; esac
+
+        # Digits are not a range. busybox `[` answers "out of range" on a value
+        # wider than the comparison holds, and an error is not a false
+        # comparison - it skips the floor by exactly the route an empty string
+        # does. Ten digits is 317 years of uptime and is short enough that no
+        # shell this runs under can overflow on it.
+        [ "${#num}" -le 10 ] || { echo no; return; }
+    done
+
+    if [ "$up" -lt "${REBOOT_FLOOR:-600}" ]; then
+        echo no
+        return
+    fi
+
+    case "$verdict" in
+        restart)
+            if [ "$short_runs" -ge "${CRASH_LOOP_N:-5}" ]; then
+                echo yes
+                return
+            fi
+            ;;
+        hung)
+            if [ "$failed_cures" -ge "${HANG_CURES_K:-2}" ]; then
+                echo yes
+                return
+            fi
+            ;;
+    esac
+
+    echo no
+}
+# --- end escalate ---
+
+# --- count ---
+# Two counters, kept as functions so the test measures what ships. They take the
+# same shape as delay_after_run: the observation and the current value in, the
+# next value out.
+#
+# SHORT_RUN is 30s and not the one second the process really survives. watch_loop
+# sleeps INTERVAL between checks and resets `started` after each start, so `ran`
+# is quantised to the poll and never reports below about five seconds - a
+# five-second threshold would be an assertion that can never be true. Thirty sits
+# clear above that quantisation and clear below the sixty seconds delay_after_run
+# already uses to mean the fault was transient.
+next_short_runs() {   # $1 = seconds the run lasted, $2 = current count
+    if [ "$1" -lt "${SHORT_RUN:-30}" ]; then
+        echo $(( $2 + 1 ))
+    else
+        echo 0
+    fi
+}
+
+# A hung verdict that arrives after a cure proves that cure did not work. The
+# first hung verdict of a fault follows no cure, so it counts nothing: otherwise
+# the first hang a board ever had would be one step away from a reboot.
+next_failed_cures() {   # $1 = cures attempted so far, $2 = current count
+    if [ "$1" -gt 0 ]; then
+        echo $(( $2 + 1 ))
+    else
+        echo "$2"
+    fi
+}
+
+# `healthy` is not the same as "the server answered". action() also returns
+# healthy for a process that is up and not answering yet, inside HANG_AFTER,
+# and the hang branch resets LAST_OK after every cure - so the very next poll
+# reports healthy. Clearing on the verdict alone wipes the counters between
+# every cure and its next hung verdict, and the counted hang escalation can
+# then never reach its threshold. Only an answer clears them.
+#
+# `stopped` is the same defect through a different door, and it arrives on the
+# condition the fault comes with. cure_hung calls S95nanokvm restart, which
+# removes /tmp/server and copies 36MB back: for that whole window there is no
+# process and no binary, which is exactly what a deliberate stop looks like. A
+# slow SD card therefore cleared the counters between every cure and the hung
+# verdict that should have counted it. Measured: a 20-second re-stage escalated
+# on the third hung verdict, a 40-second re-stage never escalated at all.
+#
+# Nothing is lost by refusing. An operator who stops the server and brings it
+# back produces an answering healthy poll, and that clears the counters through
+# the arm no cure can be mistaken for.
+should_clear() {   # $1 = verdict, $2 = did the probe answer this pass, yes or no
+    case "$1" in
+        healthy)
+            if [ "$2" = yes ]; then
+                echo yes
+            else
+                echo no
+            fi
+            ;;
+        *)
+            echo no
+            ;;
+    esac
+}
+# --- end count ---
+
 # --- cure ---
 # A hang has to be killed, not asked to stop. S95nanokvm's restart uses killall,
 # which sends SIGTERM, and a wedged process may never act on it - it would keep
 # port 80 and the replacement could not bind, so the hang would survive its own
 # cure. SIGKILL first, wait for the process to actually go, then use the normal
 # restart path so /tmp is re-staged and kvm_system comes with it.
+#
+# wait_gone's answer used to be discarded. A process in uninterruptible sleep
+# does not die from SIGKILL - a reader of /proc/cvitek/vb blocks in D state on
+# this board - so the one hang that most needs a reboot is exactly the hang this
+# cannot fix. The restart still happens either way; the caller is told.
 cure_hung() {
     force_kill
-    wait_gone
+    wait_gone || { full_restart; return 1; }
     full_restart
 }
 # --- end cure ---
+
+# --- act ---
+# /tmp does not survive a reboot, and the kernel ring buffer holds about eight
+# crashes and rolls within ten minutes. Evidence not taken here is gone, and the
+# 2026-08-04 incident was diagnosable only because a copy was made by hand
+# before the board was restarted.
+#
+# prune_reboot_dirs takes the directory it is standing in, so capture_evidence
+# calls it after cd-ing there. busybox head is not assumed to accept a negative
+# count, so the count is computed and a positive one is passed.
+prune_reboot_dirs() {
+    n=$(ls -d reboot-* 2>/dev/null | wc -l)
+    [ "$n" -le 3 ] && return 0
+
+    ls -d reboot-* 2>/dev/null | sort | head -n $(( n - 3 )) | while read -r d
+    do
+        rm -rf "$d"
+    done
+    return 0
+}
+
+# Never read /proc/cvitek/vb here. It blocks forever in uninterruptible sleep
+# and the reader cannot be killed, so a capture that touched it would mean the
+# board never reboots at all.
+capture_evidence() {   # $1 = reason
+    dir="/data/kvm-diag/reboot-$(date '+%Y%m%d-%H%M%S')"
+    mkdir -p "$dir" || return 0
+
+    echo "$1"                                                > "$dir/reason"
+    dmesg                                                    > "$dir/dmesg"         2>/dev/null
+    tail -c 65536 "$SERVER_LOG"                              > "$dir/server.log"    2>/dev/null
+    tail -c 16384 "$LOG"                                     > "$dir/supervise.log" 2>/dev/null
+    cat /proc/uptime /proc/meminfo                           > "$dir/proc"          2>/dev/null
+    cat /sys/kernel/debug/ion/cvi_carveout_heap_dump/summary > "$dir/ion"           2>/dev/null
+
+    cd /data/kvm-diag 2>/dev/null && prune_reboot_dirs
+    return 0
+}
+
+# Evidence is worth having. Uptime outranks it, so the capture runs detached
+# with a bounded wait and is abandoned if it does not finish.
+capture_bounded() {   # $1 = reason
+    capture_evidence "$1" &
+    pid=$!
+
+    i=0
+    while [ "$i" -lt 10 ]
+    do
+        kill -0 "$pid" 2>/dev/null || return 0
+        i=$(( i + 1 ))
+        sleep 1
+    done
+
+    # This reaches the capture itself and not whatever it was waiting on: a
+    # wedged dmesg or tail is a grandchild and survives. The reboot proceeds
+    # anyway, which is the property that matters, and the survivor leaves with
+    # the board.
+    log "the evidence capture did not finish, rebooting without it"
+    kill -9 "$pid" 2>/dev/null
+    return 0
+}
+
+escalate() {   # $1 = reason
+    if [ "${NO_REBOOT:-0}" = 1 ]; then
+        log "would reboot ($1), but SUPERVISE_NO_REBOOT is set"
+        return 0
+    fi
+
+    log "rebooting: $1"
+    capture_bounded "$1"
+    sync
+    reboot
+
+    # reboot returns immediately. Stop deciding while the board goes down, or
+    # the loop keeps counting against a system that is already leaving.
+    sleep 120
+}
+# --- end act ---
 
 # --- backoff ---
 # A binary that can never start must not be retried in a tight loop: this board
@@ -162,10 +425,22 @@ system_running() {
 }
 
 # A 401 counts as serving: the process is up, has bound its port and read its
-# config. If curl itself cannot run, this reports serving - never reboot or
-# restart a KVM because a probe broke.
+# config.
+#
+# Three answers, not two:
+#
+#   0  the server answered
+#   1  the server did not answer
+#   2  the probe could not run, so nothing was measured
+#
+# Everything that decides whether to act treats 2 the same as 0 - never reboot
+# or restart a KVM because a probe broke. The latch is the one reader that needs
+# the difference. It records "this server worked here once", and a probe that
+# never ran is no evidence of that: on a board without curl a fault present from
+# boot would latch on the first poll and reboot the board every REBOOT_FLOOR
+# seconds, which is exactly the cycle the latch exists to prevent.
 serving() {
-    [ -x "$(command -v curl)" ] || return 0
+    [ -x "$(command -v curl)" ] || return 2
 
     code=$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 4 "$HEALTH_URL" 2>/dev/null)
     case "$code" in
@@ -208,20 +483,84 @@ watch_loop() {
     started=$(now)
     LAST_OK=$(now)
 
+    # short_runs and failed_cures are what should_reboot judges. cures counts
+    # attempts, so a hung verdict can tell "the first hang" from "the cure did
+    # not work". A server that comes back and serves clears all three: whatever
+    # the fault was, it is over.
+    short_runs=0
+    failed_cures=0
+    cures=0
+    served=no
+
+    # A latch, not a counter. Nothing clears it, because it answers a question
+    # about this boot rather than about this fault: did the server ever work
+    # here? A reboot can only help a board where the answer is yes.
+    served_ever=no
+
     while :; do
         sleep "$INTERVAL"
 
-        serving && LAST_OK=$(now)
+        serving
+        answered=$?
 
-        case "$(action)" in
+        # LAST_OK and served follow action: anything that is not "the server
+        # said no" counts as serving, so a board that loses curl keeps behaving
+        # exactly as it does today.
+        if [ "$answered" -ne 1 ]; then
+            LAST_OK=$(now)
+            served=yes
+        else
+            served=no
+        fi
+
+        # The latch is stricter, and is the only reader that is. It answers
+        # "did this server ever work here", and a probe that could not run
+        # answers nothing. The consequence is deliberate: on a board with no
+        # curl the latch never sets and the whole reboot escalation is inert,
+        # which leaves the supervisor behaving exactly as it did before it
+        # could reboot at all.
+        if [ "$answered" -eq 0 ]; then
+            served_ever=yes
+        fi
+
+        state=$(action)
+
+        if [ "$(should_clear "$state" "$served")" = yes ]; then
+            short_runs=0
+            failed_cures=0
+            cures=0
+        fi
+
+        case "$state" in
             healthy)
                 started=$(now)
                 ;;
 
             hung)
                 stuck=$(unhealthy_for)
-                log "NanoKVM-Server is up but has not answered for ${stuck}s, killing and restarting it"
-                cure_hung
+
+                # Count first, then log the count. An operator reading this
+                # file has to be able to tell "the threshold was met and a
+                # guard refused" from "the threshold was never met", and the
+                # counter is the only thing that says which.
+                failed_cures=$(next_failed_cures "$cures" "$failed_cures")
+                log "NanoKVM-Server is up but has not answered for ${stuck}s (failed_cures=$failed_cures), killing and restarting it"
+
+                if cure_hung; then
+                    cures=$(( cures + 1 ))
+                    hang_reason="hung: $failed_cures cures did not restore service"
+                else
+                    # SIGKILL cannot clear uninterruptible sleep, and no later
+                    # cure does better. Go straight to the threshold.
+                    log "the process did not leave after SIGKILL"
+                    failed_cures=${HANG_CURES_K:-2}
+                    hang_reason="hung: the process did not leave after SIGKILL"
+                fi
+
+                if [ "$(should_reboot hung 0 "$failed_cures" "$(now)" "$served_ever")" = yes ]; then
+                    escalate "$hang_reason"
+                fi
+
                 # Give it room to come up before judging again, or a slow start
                 # would be read as another hang.
                 sleep 30
@@ -232,8 +571,20 @@ watch_loop() {
                 : # someone asked for this
                 ;;
             restart)
+                # `ran` is the time since the last observation, not how long the
+                # run lasted: `started` is reset on every healthy poll, so a
+                # server that answers between crashes never accumulates here.
+                # SHORT_RUN therefore does not discriminate inside this loop -
+                # every value it sees is about INTERVAL - and the crash loop is
+                # timed by the poll and the backoff instead.
                 ran=$(( $(now) - started ))
-                log "NanoKVM-Server is gone after ${ran}s, restarting in ${delay}s"
+                short_runs=$(next_short_runs "$ran" "$short_runs")
+                log "NanoKVM-Server is gone after ${ran}s (short_runs=$short_runs), restarting in ${delay}s"
+
+                if [ "$(should_reboot restart "$short_runs" 0 "$(now)" "$served_ever")" = yes ]; then
+                    escalate "crash loop: $short_runs runs shorter than ${SHORT_RUN:-30}s"
+                fi
+
                 sleep "$delay"
 
                 # Check again: a restart in progress may have started it while
@@ -274,7 +625,11 @@ start() {
     setsid "$0" __watch < /dev/null > /dev/null 2>&1 &
     echo "$!" > "$PIDFILE"
 
-    log "supervisor started as pid $!, checking every ${INTERVAL}s"
+    # The thresholds go in the log because /data survives the reboot they cause.
+    # Without them a reboot directory produced by a test with the floor at 0
+    # reads exactly like one produced by a real incident, for whoever opens it
+    # afterwards - and that is the only record of which run it was.
+    log "supervisor started as pid $!, checking every ${INTERVAL}s (floor ${REBOOT_FLOOR}s, ${CRASH_LOOP_N} short runs, ${HANG_CURES_K} cures, no_reboot=${NO_REBOOT})"
     echo "OK (pid $!, every ${INTERVAL}s)"
 }
 
@@ -312,9 +667,22 @@ case "$1" in
         else
             echo "supervisor : not running"
         fi
-        LAST_OK=$(now); serving || LAST_OK=0
+        serving
+        answered=$?
+
+        # Only a clear "did not answer" backdates LAST_OK, so the verdict this
+        # prints is the verdict the loop would reach. A probe that could not run
+        # says so rather than reporting the server down: `answering : no` beside
+        # `verdict : healthy` would read as a contradiction, and the operator
+        # needs to know it is curl that is missing, not the server.
+        LAST_OK=$(now)
+        [ "$answered" -eq 1 ] && LAST_OK=0
         echo "verdict    : $(action)"
-        echo "answering  : $(serving && echo yes || echo no)"
+        case "$answered" in
+            0) echo "answering  : yes" ;;
+            1) echo "answering  : no" ;;
+            *) echo "answering  : unknown (curl is missing, so no reboot is possible)" ;;
+        esac
         echo "server     : $(process_running && echo up || echo down)"
         echo "kvm_system : $(system_running && echo up || echo down)"
         echo "recent     :"

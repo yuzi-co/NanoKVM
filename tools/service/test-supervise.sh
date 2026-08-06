@@ -32,12 +32,15 @@ echo "===== crashed, or stopped on purpose? ====="
 # The distinction costs nothing to make: `S95nanokvm stop` removes /tmp/server
 # after killing the process, so the binary's presence is the operator's intent.
 # Without this the supervisor would fight every deliberate stop.
+# serving has three answers, so the stub has three values. Anything that is not
+# yes or no stands for "the probe could not run at all", which is what the
+# shipped serving reports when curl is missing.
 decide_case() {
     desc="$1"; binary="$2"; running="$3"; serving="$4"; unhealthy="$5"; want="$6"
     got=$(BIN="$binary" RUN="$running" SRV="$serving" UNW="$unhealthy" WORK="$WORK" sh -c '
         binary_present()  { [ "$BIN" = yes ]; }
         process_running() { [ "$RUN" = yes ]; }
-        serving()         { [ "$SRV" = yes ]; }
+        serving()         { case "$SRV" in yes) return 0 ;; no) return 1 ;; *) return 2 ;; esac }
         unhealthy_for()   { echo "$UNW"; }
         . "$WORK/decide.sh"
         action
@@ -70,6 +73,16 @@ decide_case "not answering for a long time"              yes yes no 600 hung
 # under heavy IO - none of those are worth killing a working KVM for, so the
 # grace period has to be generous and the default has to be inaction.
 decide_case "answering again before the threshold"       yes yes yes 59  healthy
+
+echo
+echo "  --- a probe that cannot run is not evidence of anything"
+# serving reports a third answer for "curl is missing, so nothing was measured".
+# action must read that as serving, at any silence, forever. The alternative is
+# that a board without curl reports hung on every poll, and the supervisor then
+# kills and restarts a perfectly healthy KVM once a minute - which is worse than
+# the reboot cycle this third answer exists to close.
+decide_case "the probe cannot run, exactly at the threshold" yes yes unavailable 60   healthy
+decide_case "the probe cannot run, hours of silence"         yes yes unavailable 9999 healthy
 
 echo
 echo "===== curing a hang means killing it first ====="
@@ -449,10 +462,32 @@ grep -qE '^[[:space:]]+if \[ "\$\(should_clear ' "$SV" \
     && note "the loop actually asks should_clear before wiping the counters" OK \
     || note "should_clear is defined and never called" FAIL
 
+# serving fails open on purpose: a probe that cannot run must never kill a
+# working KVM. That answer cannot also be the answer the latch reads, or "the
+# probe could not run" is recorded as "the server answered" and a board without
+# curl gets the reboot cycle the latch exists to prevent. Three answers, and
+# only 0 means the server answered.
+grep -qE '^[[:space:]]+\[ -x "\$\(command -v curl\)" \] \|\| return 2$' "$SV" \
+    && note "a probe that cannot run says so, rather than saying success" OK \
+    || note "a missing curl is indistinguishable from an answering server" FAIL
+
 # The latch has to reach both decisions, or half the reboot cycle comes back.
 grep -qE '^[[:space:]]+served_ever=yes$' "$SV" \
     && note "the loop sets the latch when the probe answers" OK \
     || note "nothing ever sets served_ever, so no board could reboot" FAIL
+
+# watch_loop is a while loop with side effects, so this suite cannot drive it
+# and the latch's own assignment has no unit case. What can be asserted is its
+# shape: the one assignment in the file sits directly inside the branch that
+# tests for status 0, so no other status can reach it. Deleting the branch or
+# widening it to -ne 1 makes this report FAIL.
+latch_line=$(sed -n '/^[[:space:]]*if \[ "\$answered" -eq 0 \]; then$/{n;s/^[[:space:]]*//;p;}' "$SV")
+latch_count=$(grep -c '^[[:space:]]*served_ever=yes$' "$SV")
+if [ "$latch_line" = "served_ever=yes" ] && [ "$latch_count" -eq 1 ]; then
+    note "the latch is set only where the probe answered" OK
+else
+    note "the latch is set outside the answered branch (guarded [$latch_line], $latch_count assignments)" FAIL
+fi
 grep -qE 'should_reboot restart .*"\$served_ever"' "$SV" \
     && note "the restart branch passes the latch" OK \
     || note "the restart branch judges without the latch" FAIL

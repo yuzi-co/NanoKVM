@@ -89,7 +89,15 @@ log() {
 # those is worth killing a working KVM for.
 action() {
     if process_running; then
-        if serving; then
+        serving
+        answered=$?
+
+        # Anything but a clear "no" counts as serving. A probe that cannot run
+        # is not evidence that the server is down, and killing a working KVM
+        # because curl is missing is the worst trade this script can make: it
+        # would report hung on every poll and restart a healthy server once a
+        # minute, forever.
+        if [ "$answered" -ne 1 ]; then
             echo healthy
             return
         fi
@@ -410,10 +418,22 @@ system_running() {
 }
 
 # A 401 counts as serving: the process is up, has bound its port and read its
-# config. If curl itself cannot run, this reports serving - never reboot or
-# restart a KVM because a probe broke.
+# config.
+#
+# Three answers, not two:
+#
+#   0  the server answered
+#   1  the server did not answer
+#   2  the probe could not run, so nothing was measured
+#
+# Everything that decides whether to act treats 2 the same as 0 - never reboot
+# or restart a KVM because a probe broke. The latch is the one reader that needs
+# the difference. It records "this server worked here once", and a probe that
+# never ran is no evidence of that: on a board without curl a fault present from
+# boot would latch on the first poll and reboot the board every REBOOT_FLOOR
+# seconds, which is exactly the cycle the latch exists to prevent.
 serving() {
-    [ -x "$(command -v curl)" ] || return 0
+    [ -x "$(command -v curl)" ] || return 2
 
     code=$(curl -sSk -o /dev/null -w '%{http_code}' --max-time 4 "$HEALTH_URL" 2>/dev/null)
     case "$code" in
@@ -473,12 +493,27 @@ watch_loop() {
     while :; do
         sleep "$INTERVAL"
 
-        if serving; then
+        serving
+        answered=$?
+
+        # LAST_OK and served follow action: anything that is not "the server
+        # said no" counts as serving, so a board that loses curl keeps behaving
+        # exactly as it does today.
+        if [ "$answered" -ne 1 ]; then
             LAST_OK=$(now)
             served=yes
-            served_ever=yes
         else
             served=no
+        fi
+
+        # The latch is stricter, and is the only reader that is. It answers
+        # "did this server ever work here", and a probe that could not run
+        # answers nothing. The consequence is deliberate: on a board with no
+        # curl the latch never sets and the whole reboot escalation is inert,
+        # which leaves the supervisor behaving exactly as it did before it
+        # could reboot at all.
+        if [ "$answered" -eq 0 ]; then
+            served_ever=yes
         fi
 
         state=$(action)
@@ -625,9 +660,22 @@ case "$1" in
         else
             echo "supervisor : not running"
         fi
-        LAST_OK=$(now); serving || LAST_OK=0
+        serving
+        answered=$?
+
+        # Only a clear "did not answer" backdates LAST_OK, so the verdict this
+        # prints is the verdict the loop would reach. A probe that could not run
+        # says so rather than reporting the server down: `answering : no` beside
+        # `verdict : healthy` would read as a contradiction, and the operator
+        # needs to know it is curl that is missing, not the server.
+        LAST_OK=$(now)
+        [ "$answered" -eq 1 ] && LAST_OK=0
         echo "verdict    : $(action)"
-        echo "answering  : $(serving && echo yes || echo no)"
+        case "$answered" in
+            0) echo "answering  : yes" ;;
+            1) echo "answering  : no" ;;
+            *) echo "answering  : unknown (curl is missing, so no reboot is possible)" ;;
+        esac
         echo "server     : $(process_running && echo up || echo down)"
         echo "kvm_system : $(system_running && echo up || echo down)"
         echo "recent     :"

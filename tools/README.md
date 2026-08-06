@@ -227,6 +227,114 @@ Both scripts detach with `setsid`. Redirecting a background loop's stdio to
 `S98supervise start` printed its line and then held the session open until the
 client gave up after five minutes.
 
+### When restarting cannot work
+
+The supervisor restarts the server and does not reboot the board. That is right
+for a hung server. It is wrong for an exhausted ION carveout: the allocation is
+leaked inside the kernel modules, `rmmod soph_vpss` answers `Resource
+temporarily unavailable` with zero processes running, and no userspace action
+frees it. On 2026-08-04 the supervisor restarted a dead server 23 times over 22
+minutes, and it would have continued indefinitely.
+
+The supervisor now reboots the board in two cases:
+
+| Case | Condition |
+| ---- | --------- |
+| Crash loop | 5 consecutive runs shorter than 30 seconds |
+| Unrecoverable hang | 2 cures that did not restore service, or one process that did not die from SIGKILL |
+
+Both cases also need the server to have answered at least once since this boot.
+
+The trigger is blind. It counts failures and never reads `dmesg` to decide,
+because the ring buffer holds about eight crashes and rolls within ten minutes:
+a signature would get weaker exactly as the fault got worse.
+
+Only an answering probe clears the counters. A verdict is not enough: the
+supervisor's own cure runs `S95nanokvm restart`, which removes `/tmp/server` and
+copies 36MB back, and for about half a minute of that the board looks stopped. A
+counter that cleared there would reset on every slow SD card, and the hang
+escalation could never reach its threshold on the boards that need it most.
+
+Two guards stand between this and a reboot loop, and they do different jobs.
+
+**A board that has not answered once since boot never reboots.** The supervisor
+latches the first poll where the health probe answered, and the reboot decision
+refuses without it. The latch needs a positive answer, not merely the absence of
+a negative one: the probe reports a third state for "curl is missing, so nothing
+was measured", and that state never sets the latch. The consequence is
+deliberate. On a board without `curl` the latch never sets, the reboot
+escalation is inert, and the supervisor restarts the server exactly as it did
+before it could reboot at all. Install `curl` before you rely on this feature.
+
+A reboot cures a board that worked and then broke. It never cures a server that
+has not worked here at all - an unreadable certificate under `proto: https`, a
+build that skipped `patchelf`, a truncated copy from a full SD card. Each of
+those leaves the binary staged and executable, so the verdict is `restart`, and
+each survives a reboot unchanged. The floor alone cannot stop that case: the
+counters do not survive a reboot, so the same sequence rebuilds them and
+escalates again as soon as uptime passes the floor.
+
+A stub staged before the supervisor starts therefore never causes a reboot. To
+reproduce a crash loop on a board, start the supervisor against the healthy
+server, wait for one poll to answer, and break the binary after that.
+
+**A floor on uptime limits how often the other case can turn.** The board
+reboots only if it has been up for 10 minutes or more. The slowest crash loop is
+a server that lives just under a minute each time without ever answering: every
+poll inside that minute reports healthy and resets the measurement, so the run
+still counts as short, and four cycles of about 55 seconds plus the growing
+backoff put the fifth short run about 310 seconds in. The fault this feature
+exists for kills the server in under a second, and the fifth short run arrives
+about 100 seconds in. The ten-minute floor blocks the slow case with about twice
+the margin it needs and the fast case with about six times.
+
+`ran` in the log measures the time since the last observation, not how long the
+run lasted. `SHORT_RUN` therefore never discriminates inside the loop; it is the
+threshold the unit cases measure, and the poll interval is what the board
+measures.
+
+Both guards fail closed. Any value the comparisons cannot use - an empty uptime
+because `cut` could not fork, a misspelt `SUPERVISE_REBOOT_FLOOR` - means no
+reboot. `[ "" -lt 600 ]` is an error rather than a false comparison, so a guard
+that does not check its inputs skips itself exactly when the board is least
+healthy.
+
+Every start line records the thresholds it resolved, so a `reboot-*` directory
+produced by a test is not mistaken for one produced by an incident:
+
+```
+2026-08-05 11:20:14 supervisor started as pid 4711, checking every 5s (floor 600s, 5 short runs, 2 cures, no_reboot=0)
+```
+
+The restart line carries `short_runs` and the hang line carries `failed_cures`.
+Without them an operator cannot tell "the threshold was met and the floor
+refused" from "the threshold was never met".
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `SUPERVISE_REBOOT_FLOOR` | 600 | Seconds of uptime below which it never reboots |
+| `SUPERVISE_SHORT_RUN` | 30 | A run shorter than this counts toward a crash loop |
+| `SUPERVISE_CRASH_LOOP_N` | 5 | Consecutive short runs that trigger a reboot |
+| `SUPERVISE_HANG_CURES` | 2 | Failed cures that trigger a reboot |
+| `SUPERVISE_NO_REBOOT` | 0 | Set to 1 to log the decision and not act on it |
+
+Before it reboots, the supervisor writes `/data/kvm-diag/reboot-<stamp>/` with
+the reason, `dmesg`, the tail of the server log, the tail of its own log,
+`/proc/uptime`, `/proc/meminfo` and the ION carveout summary. Three of these
+directories are kept. The capture runs detached and is abandoned after ten
+seconds, because a capture that wedges would mean the board never reboots.
+
+Nothing in the capture reads `/proc/cvitek/vb`. That file blocks forever in
+uninterruptible sleep and the reader cannot be killed.
+
+```shell
+sh tools/service/test-supervise.sh            # the decisions
+sh tools/service/test-supervise-mutation.sh   # proves those cases can fail
+```
+
+Run both on the board as well as on a workstation. busybox `ash` is not the
+shell the tests were written in.
+
 ## Recovering a board that will not boot
 
 Check which of these your enclosure actually gives you before you need one. On

@@ -1126,11 +1126,13 @@ ssh root@10.0.0.222 'command -v curl && curl --version | head -1'
 
 Expected: a path and a version line.
 
-`serving()` returns 0 when `curl` is missing — never reboot or restart a KVM
-because a probe broke. The consequence is that on a board without `curl` every
-poll reports the server as answering, `action` can never return `hung`, and the
-whole hang half of this feature is inert. The crash half still works. If this
-step finds no `curl`, record it and skip steps 5 and 6.
+**If there is no `curl`, stop here. Do not install and do not deploy.** Every
+step below is unrunnable and the feature is inert: `serving()` reports "the probe
+could not run" when `curl` is missing, that answer counts as serving everywhere
+that decides whether to act — never restart a KVM because a probe broke — and it
+is the one answer the `served_ever` latch refuses, so no reboot is possible at
+any uptime. A board without `curl` gets a supervisor that behaves exactly as it
+did before this feature, and an acceptance run that could prove nothing about it.
 
 - [ ] **Step 2: Back up and install**
 
@@ -1171,8 +1173,12 @@ in the middle of the cure. Two of those have already produced defects.
 
 It needs no stub. Point the probe at a port nothing listens on. `serving` then
 always fails while `NanoKVM-Server` is up and healthy, so `action` returns `hung`
-and the whole path runs — against a KVM that keeps answering on port 80 the
-entire time.
+and the whole path runs, and no binary is ever replaced.
+
+The KVM does not stay reachable through this step. Each cure runs `killall -9`
+and then `S95nanokvm restart`, which removes `/tmp/server` and copies 36MB back,
+so port 80 is down for roughly half a minute per cure and this step performs
+three or more cures. Do not run it while somebody needs the KVM.
 
 ```shell
 ssh root@10.0.0.222 '
@@ -1186,15 +1192,25 @@ Each cure costs about 90 seconds — `HANG_AFTER` is 60 and the hang branch slee
 30 afterwards. Wait about six minutes, then:
 
 ```shell
-ssh root@10.0.0.222 'grep -E "has not answered|did not leave|would reboot" /data/supervise.log | tail -10'
+ssh root@10.0.0.222 'cut -d. -f1 /proc/uptime
+    grep -E "has not answered|did not leave|would reboot" /data/supervise.log | tail -10'
 ```
 
 Expected: three or more `killing and restarting it` lines whose `failed_cures=`
 value climbs 0, 1, 2, 3, and **no** `would reboot` line. The climbing count is
-the evidence: it can only climb if the counters survived the window where
-`S95nanokvm` had removed `/tmp/server` and the verdict was `stopped`. The absent
-`would reboot` line is the latch — this probe never answered, so no reboot is
-available on this run at any uptime.
+the evidence for the counters: it can only climb if they survived the window
+where `S95nanokvm` had removed `/tmp/server` and the verdict was `stopped`.
+
+**The uptime reading is what makes the absent `would reboot` line mean the
+latch.** The floor produces the identical absence, so without it the step's
+conclusion does not follow from its assertions. Assert the printed uptime is
+**above 600**. Then the floor is satisfied, `failed_cures` has passed 2, and the
+only thing left that can refuse is the latch — which is unset because this probe
+answered on no poll. If the uptime is under 600, wait and read it again before
+you record anything; the log lines stay valid.
+
+This one line is the only hardware proof anywhere in this plan that the reboot
+cycle cannot happen. Every other step exercises a board whose probe did answer.
 
 Then put the probe back:
 
@@ -1273,9 +1289,11 @@ ssh root@10.0.0.222 '
 '
 ```
 
-Expected: `answering : yes` — this is the poll that sets the latch. Now stage the
-stub with the fault injection above, and expect the board to reboot within about
-three minutes. Poll until it answers again, then:
+Expected: `answering : yes`. That is `status` running `serving` in its own
+process, so it does not set the latch itself — it reports that the probe answers,
+and the latch was set by `watch_loop`'s own polls during the ten-second wait. Now
+stage the stub with the fault injection above, and expect the board to reboot
+within about three minutes. Poll until it answers again, then:
 
 ```shell
 ssh root@10.0.0.222 'cut -d. -f1 /proc/uptime; ls -d /data/kvm-diag/reboot-*; \
@@ -1394,8 +1412,9 @@ worse than no guard.
 - [ ] **Step 12: Record the result**
 
 Write the outcome of each of steps 1 to 11 into the plan's ledger, including the
-`failed_cures` sequence from step 5 and both uptime readings from step 8. Then
-remove the leftovers:
+`failed_cures` sequence from step 5, the uptime step 5 read while it produced no
+`would reboot` line, and both uptime readings from step 8. Then remove the
+leftovers:
 
 ```shell
 ssh root@10.0.0.222 'rm -f /tmp/test-supervise.sh /tmp/test-supervise-mutation.sh /data/NanoKVM-Server.real /tmp/stub'

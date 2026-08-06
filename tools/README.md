@@ -256,7 +256,14 @@ escalation could never reach its threshold on the boards that need it most.
 Two guards stand between this and a reboot loop, and they do different jobs.
 
 **A board that has not answered once since boot never reboots.** The supervisor
-latches the first poll that answers, and the reboot decision refuses without it.
+latches the first poll where the health probe answered, and the reboot decision
+refuses without it. The latch needs a positive answer, not merely the absence of
+a negative one: the probe reports a third state for "curl is missing, so nothing
+was measured", and that state never sets the latch. The consequence is
+deliberate. On a board without `curl` the latch never sets, the reboot
+escalation is inert, and the supervisor restarts the server exactly as it did
+before it could reboot at all. Install `curl` before you rely on this feature.
+
 A reboot cures a board that worked and then broke. It never cures a server that
 has not worked here at all - an unreadable certificate under `proto: https`, a
 build that skipped `patchelf`, a truncated copy from a full SD card. Each of

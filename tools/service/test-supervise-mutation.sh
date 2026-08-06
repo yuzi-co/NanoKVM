@@ -65,6 +65,20 @@ mutate "the latch can never fire"          's/\[ "\$served_ever" != yes \]/[ 1 -
 mutate "the latch is cleared with the counters" 's/^            cures=0$/            served_ever=no/'
 
 echo
+echo "== the probe's third answer, which is what keeps the latch honest"
+# serving fails open so that a broken probe never kills a working KVM. That
+# answer must not also be the answer the latch reads: on a board without curl
+# the latch would set on the first poll, a fault present from boot would
+# accumulate, and the board would reboot every REBOOT_FLOOR seconds forever.
+# Measured against the loop with this defect present: reboot at uptime 620.
+mutate "a missing curl reports the server as answering" 's/|| return 2$/|| return 0/'
+# The other direction is worse than the bug it would fix. action reading "could
+# not probe" as "not serving" reports hung on every poll, and the supervisor
+# then kills and restarts a healthy KVM once a minute.
+mutate "a probe that could not run is read as a hang" 's/"\$answered" -ne 1/"\$answered" -eq 0/'
+mutate "the latch takes a probe that could not run"   's/"\$answered" -eq 0/"\$answered" -ne 1/'
+
+echo
 echo "== the floor, which sets how often a reboot cycle could turn"
 # The next expression also rewrites the assignment at the top of the file,
 # because SUPERVISE_REBOOT_FLOOR:-600 contains the pattern as a substring. It is

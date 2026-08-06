@@ -88,7 +88,19 @@ Today's failure at least answers SSH forever; a reboot loop does not, and the ca
 has to come out.
 
 **The latch prevents a cycle.** `should_reboot` refuses unless the probe has
-answered at least once since this boot. A reboot cures a board that worked and
+answered at least once since this boot. The latch requires a positive answer from
+the health probe. `serving` fails open by design — a probe that cannot run must
+never kill a working KVM — so it reports three states rather than two: the server
+answered, the server did not answer, and the probe could not run. Only the first
+sets the latch. A latch derived from "the probe did not say no" records a missing
+`curl` as an answer, and a board without `curl` then gets the reboot cycle this
+latch exists to prevent. Everything that decides whether to act still treats "the
+probe could not run" as serving, so no restart behaviour depends on `curl` being
+present. **Without `curl` the escalation is inert by design**: the latch never
+sets, no reboot is possible, and the supervisor behaves as it did before it could
+reboot at all. Hardware acceptance stops if `curl` is missing.
+
+A reboot cures a board that worked and
 then broke. It is never a cure for a server that has not answered once, and this
 board carries several faults with exactly that shape: `proto: https` with an
 unreadable certificate panics `server/main.go` on every start, a build that
@@ -261,7 +273,9 @@ the operator asked for it.
 Two counters are added to `watch_loop`, both initialised to 0 beside `delay`:
 `short_runs` and `failed_cures`. A third, `cures`, counts cures attempted. A
 fourth variable, `served_ever`, is a latch rather than a counter: it starts at
-`no`, the poll that answers sets it to `yes`, and nothing ever clears it.
+`no`, a poll where `serving` reported the server answered sets it to `yes`, and
+nothing ever clears it. `serving` reporting that it could not run does not set
+it, although that poll still counts as serving everywhere else.
 
 An answered probe clears all three counters. The verdict name alone is not enough
 — `action` also reports `healthy` for a process that is up and not answering yet
@@ -462,6 +476,7 @@ prune_reboot_dirs() {
 | Fault lets the server answer once, then returns | At most one reboot per boot that served | The latch is set again, so the floor is what limits the rate. This is the case the floor exists for |
 | `/proc/uptime` unreadable, or a threshold misspelt | No reboot | Every value the comparisons touch is validated, and anything that is not a plain non-negative integer means `no` |
 | Operator stops the server | Nothing | `stopped` never escalates |
+| `curl` missing | The whole escalation is inert | `serving` reports "could not probe", which counts as serving everywhere but the latch. No reboot is possible, and the supervisor behaves as it did before this feature. Hardware acceptance stops at step 1 |
 
 ## Testing
 
@@ -521,8 +536,10 @@ starts produces no escalation at all, because the probe never answered. Start th
 supervisor against the healthy server, let it answer one poll, and stage the stub
 after that — which is also how the 2026-08-04 fault arrived.
 
-1. **`curl` exists.** Without it `serving` returns 0 on every poll, `action` can
-   never return `hung`, and the whole hang half of this feature is inert.
+1. **`curl` exists. This is a hard stop.** Without it `serving` reports "could
+   not probe" on every poll, `action` can never return `hung`, and the latch
+   never sets — so the whole escalation is inert. Do not deploy this feature to
+   a board without `curl`; there is nothing for the acceptance run to accept.
 2. **The hang path runs end to end.** Point `SUPERVISE_URL` at a port nothing
    listens on, against the real healthy server. This is the only test that
    reaches `should_clear` across the real `S95nanokvm` re-stage window.

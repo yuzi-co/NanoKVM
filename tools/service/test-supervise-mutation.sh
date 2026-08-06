@@ -97,6 +97,9 @@ echo "== failing closed on input the comparisons cannot use"
 mutate "an empty value is not rejected"   "s/''|/'x'|/"
 mutate "letters count as numbers"         's/\[!0-9\]/[!0-9a-z]/'
 mutate "the floor's own value is unchecked" 's/^               "\${REBOOT_FLOOR:-600}" /               /'
+# A digit filter is not a range check, and the failure mode is the same one:
+# busybox `[` errors on a value it cannot hold, so the floor skips itself.
+mutate "the length bound is too wide to matter" 's/-le 10 \]/-le 99 ]/'
 
 echo
 echo "== the crash-loop threshold"

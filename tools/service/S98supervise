@@ -183,6 +183,13 @@ should_reboot() {
                "${REBOOT_FLOOR:-600}" "${CRASH_LOOP_N:-5}" "${HANG_CURES_K:-2}"
     do
         case "$num" in ''|*[!0-9]*) echo no; return ;; esac
+
+        # Digits are not a range. busybox `[` answers "out of range" on a value
+        # wider than the comparison holds, and an error is not a false
+        # comparison - it skips the floor by exactly the route an empty string
+        # does. Ten digits is 317 years of uptime and is short enough that no
+        # shell this runs under can overflow on it.
+        [ "${#num}" -le 10 ] || { echo no; return; }
     done
 
     if [ "$up" -lt "${REBOOT_FLOOR:-600}" ]; then

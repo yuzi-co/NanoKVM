@@ -259,6 +259,19 @@ got=$(WORK="$WORK" sh -c 'REBOOT_FLOOR=ten; . "$WORK/escalate.sh"; should_reboot
 [ "$got" = no ] && note "a floor that is not a number -> $got" OK \
                 || note "a floor that is not a number -> $got, want no" FAIL
 
+# Digits are not a range. busybox `[` answers "out of range" on a value wider
+# than the comparison can hold, and that is an error, so it skips the floor by
+# exactly the route an empty string does. /proc/uptime cannot produce one. A
+# typo in SUPERVISE_REBOOT_FLOOR can, and it would turn an operator's "never
+# reboot this board" into "reboot this board at any uptime".
+got=$(WORK="$WORK" sh -c '. "$WORK/escalate.sh"; should_reboot restart 5 0 99999999999999999999 yes')
+[ "$got" = no ] && note "an uptime too wide for the comparison -> $got" OK \
+                || note "an uptime too wide for the comparison -> $got, want no" FAIL
+
+got=$(WORK="$WORK" sh -c 'REBOOT_FLOOR=99999999999999999999; . "$WORK/escalate.sh"; should_reboot restart 5 0 3600 yes')
+[ "$got" = no ] && note "a floor too wide for the comparison -> $got" OK \
+                || note "a floor too wide for the comparison -> $got, want no" FAIL
+
 echo
 echo "===== counting the runs that did not last ====="
 # The threshold is 30s and not the one second the process actually survives.

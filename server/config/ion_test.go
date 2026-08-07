@@ -12,8 +12,8 @@ func TestAMissingIonBlockGetsTheDefaultFloor(t *testing.T) {
 	instance = Config{}
 	checkDefaultValue()
 
-	if instance.Ion.ReserveFloor != 25165824 {
-		t.Fatalf("ReserveFloor = %d, want 25165824", instance.Ion.ReserveFloor)
+	if instance.Ion.ReserveFloor != 12582912 {
+		t.Fatalf("ReserveFloor = %d, want 12582912", instance.Ion.ReserveFloor)
 	}
 }
 

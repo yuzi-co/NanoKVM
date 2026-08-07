@@ -107,7 +107,7 @@ Do not read `/proc/cvitek/vb`. That file blocks the reader forever in uninterrup
 
   The growth term is the largest this process has ever caused on this board, for the delivery
   paths this board has actually used. It is a **lower bound on future need, not an upper
-  bound**: a board that has only served screenshots grew 12,550,496 bytes, and its first H264
+  bound**: a board that has only served screenshots grew 12,550,144 bytes, and its first H264
   stream then allocated `VbPool2` and `VbPool3` on top to reach 23,891,968. So the measurement
   cannot cover a path the board has not exercised yet, and the floor stands until the board is
   observed needing more.

@@ -38,6 +38,11 @@ export function getMemoryLimit() {
   return http.get('/api/vm/memory/limit');
 }
 
+// get ION carveout state
+export function getIon() {
+  return http.get('/api/vm/ion');
+}
+
 // set memory limit
 export function setMemoryLimit(enabled: boolean, limit: number) {
   const data = {

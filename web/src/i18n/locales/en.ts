@@ -315,6 +315,13 @@ const en = {
         image: 'Image Version',
         imageTip: 'NanoKVM system image version',
         deviceKey: 'Device Key',
+        videoMemory: 'Video Memory',
+        videoMemoryTip:
+          'Memory reserved for video capture. It is not shared with the rest of the system.',
+        videoMemoryGenerations_one: '{{count}} earlier NanoKVM session is holding video memory',
+        videoMemoryGenerations_other:
+          '{{count}} earlier NanoKVM sessions are holding video memory',
+        videoMemoryReboot: 'Reboot to reclaim it.',
         community: 'Community',
         hostname: 'Hostname',
         hostnameUpdated: 'Hostname updated. Reboot to apply.',
@@ -760,6 +767,16 @@ const en = {
     menu: {
       collapse: 'Collapse Menu',
       expand: 'Expand Menu'
+    },
+    ion: {
+      checking: 'Checking video memory before starting the stream...',
+      warn: 'Video memory is low. One server restart would exhaust it. Reboot when convenient.',
+      criticalTitle: 'Not enough video memory to start the stream',
+      criticalBody:
+        'Starting video would exhaust the reserved memory and stop the server. Every other function still works, including power control and reboot. Only a reboot of NanoKVM reclaims this memory.',
+      criticalContinue: 'Start video anyway',
+      criticalReboot: 'Reboot NanoKVM',
+      criticalRebooting: 'Rebooting...'
     }
   }
 };

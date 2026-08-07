@@ -11,6 +11,7 @@ type Config struct {
 	Stun           string   `yaml:"stun"`
 	Turn           Turn     `yaml:"turn"`
 	Security       Security `yaml:"security"`
+	Ion            Ion      `yaml:"ion"`
 	// Proxy reaches the internet through an intermediary. A complete URL or a
 	// bare host:port. Empty means the environment decides.
 	Proxy string `yaml:"proxy"`
@@ -48,6 +49,20 @@ type Turn struct {
 type Security struct {
 	LoginLockoutDuration int `yaml:"loginLockoutDuration"`
 	LoginMaxFailures     int `yaml:"loginMaxFailures"`
+}
+
+// Ion configures how the carveout is graded.
+type Ion struct {
+	// ReserveFloor is the assumed cost of starting the stream, in bytes, used
+	// until this process has been observed needing more. 12MB: opening a stream
+	// on a fresh board took the carveout from 19,050,496 to 30,392,320, so one
+	// stream start costs 11,341,824 bytes.
+	//
+	// An earlier value of 24MB was the cost of a whole capture session, which
+	// graded a healthy board amber: `ok` needs twice this much free, and twice
+	// 24MB is 64% of the 75MB carveout, so a board with video running could
+	// never reach it.
+	ReserveFloor uint64 `yaml:"reserveFloor"`
 }
 
 type Hardware struct {

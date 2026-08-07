@@ -51,18 +51,45 @@ func TestReadMeasuresTheReserveFromPeakGrowth(t *testing.T) {
 	dir := fakeCarveout(t, 78643200, 19050496, 19050496, summaryIdle)
 	Init(25165824)
 
-	// The board captures: alloc and peak both reach the measured value.
+	// The board captures a stream on top of what it already held: alloc and
+	// peak both reach the two-generation value.
+	writeCounter(t, dir, "alloc_mem", 49459200)
+	writeCounter(t, dir, "peak", 49459200)
+
+	got := Read()
+
+	// 49459200 - 19050496 = 30408704, above the 25165824 floor.
+	if got.Reserve != 30408704 {
+		t.Fatalf("Reserve = %d, want 30408704", got.Reserve)
+	}
+	if !got.Measured {
+		t.Fatal("Measured = false, want true once the growth exceeds the floor")
+	}
+}
+
+// TestTheFloorWinsWhileTheMeasurementIsBelowIt documents the asymmetry that
+// TestReadMeasuresTheReserveFromPeakGrowth's numbers used to obscure: a
+// measurement is a lower bound over the paths exercised so far, not an upper
+// bound, so a smaller-than-floor measurement must not replace the floor.
+//
+// One full capture session measured 23,891,968 bytes on hardware, which is
+// just under the 24MB floor. A board that has exercised only the paths seen
+// so far therefore keeps the floor, and that is intended: the measurement
+// cannot bound a path the board has not used yet.
+func TestTheFloorWinsWhileTheMeasurementIsBelowIt(t *testing.T) {
+	dir := fakeCarveout(t, 78643200, 19050496, 19050496, summaryIdle)
+	Init(25165824)
+
 	writeCounter(t, dir, "alloc_mem", 42942464)
 	writeCounter(t, dir, "peak", 42942464)
 
 	got := Read()
 
-	// 42942464 - 19050496 = 23891968, the measured cost of one session.
-	if got.Reserve != 23891968 {
-		t.Fatalf("Reserve = %d, want 23891968", got.Reserve)
+	if got.Reserve != 25165824 {
+		t.Fatalf("Reserve = %d, want the floor 25165824", got.Reserve)
 	}
-	if !got.Measured {
-		t.Fatal("Measured = false, want true once the growth exceeds the floor")
+	if got.Measured {
+		t.Fatal("Measured = true, want false while growth stays below the floor")
 	}
 }
 

@@ -318,8 +318,9 @@ const en = {
         videoMemory: 'Video Memory',
         videoMemoryTip:
           'Memory reserved for video capture. It is not shared with the rest of the system.',
-        videoMemoryGenerations_one: '{{count}} server restart is holding video memory',
-        videoMemoryGenerations_other: '{{count}} server restarts are holding video memory',
+        videoMemoryGenerations_one: '{{count}} earlier NanoKVM session is holding video memory',
+        videoMemoryGenerations_other:
+          '{{count}} earlier NanoKVM sessions are holding video memory',
         videoMemoryReboot: 'Reboot to reclaim it.',
         community: 'Community',
         hostname: 'Hostname',

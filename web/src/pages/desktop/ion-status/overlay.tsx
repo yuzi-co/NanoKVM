@@ -1,9 +1,23 @@
-import { AlertCircle, AlertTriangle } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/vm.ts';
 
 import type { IonStatus } from './model';
+
+// Neutral, not a warning: this is the state before the ION check has an answer,
+// not a verdict about the answer. It must read as distinct from both the plain
+// black panel (nothing shown) and the red critical gate (something is wrong).
+export function IonCheckingIndicator() {
+  const { t } = useTranslation();
+
+  return (
+    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2.5 bg-black/60 text-neutral-400">
+      <Loader2 className="h-5 w-5 shrink-0 animate-spin" />
+      <span className="text-sm">{t('ion.checking')}</span>
+    </div>
+  );
+}
 
 export function IonWarningBadge({ status }: { status: IonStatus | null }) {
   const { t } = useTranslation();

@@ -742,7 +742,8 @@ const en = {
       criticalBody:
         'Starting video would exhaust the reserved memory and stop the server. Every other function still works, including power control and reboot. Only a reboot of NanoKVM reclaims this memory.',
       criticalContinue: 'Start video anyway',
-      criticalReboot: 'Reboot NanoKVM'
+      criticalReboot: 'Reboot NanoKVM',
+      criticalRebooting: 'Rebooting...'
     }
   }
 };

@@ -102,9 +102,26 @@ Do not read `/proc/cvitek/vb`. That file blocks the reader forever in uninterrup
   confirmed which process allocates it — `kvm_system` also runs at boot. Hardware acceptance
   must take the count through two restarts, not one. If the relationship does not hold, report
   `generations` as unknown rather than report a number we cannot defend.
-- `reserve` = `peak` - `allocAtStart`, where the server records `allocAtStart` at startup and
-  then writes 0 to `peak`. This is the largest growth this process has ever caused on this
-  board, for the delivery paths this board actually uses.
+- `reserve` = the **larger** of the configured floor and `peak` - `allocAtStart`, where the
+  server records `allocAtStart` at startup and then writes 0 to `peak`.
+
+  The growth term is the largest this process has ever caused on this board, for the delivery
+  paths this board has actually used. It is a **lower bound on future need, not an upper
+  bound**: a board that has only served screenshots grew 12,550,496 bytes, and its first H264
+  stream then allocated `VbPool2` and `VbPool3` on top to reach 23,891,968. So the measurement
+  cannot cover a path the board has not exercised yet, and the floor stands until the board is
+  observed needing more.
+
+  The asymmetry decides the direction to err in. A reserve that is too low reports `ok`, the
+  operator opens the stream, the allocation fails, and the server segfaults with no recovery
+  but a reboot — the exact failure this feature exists to prevent. A reserve that is too high
+  warns earlier than strictly necessary and costs a reboot the operator did not have to make.
+  Take the larger value.
+
+  One consequence is worth stating plainly: one full measured session, 23,891,968, is just
+  under the 24MB floor. On a board that exercises only the paths measured so far, the floor
+  stays operative and `measured` stays false. That is correct behaviour, not a dead feature —
+  a board that streams and screenshots and serves MJPEG will exceed it.
 - `verdict` compares `free` against `reserve`.
 
 The design reports `generations` and not "orphaned bytes". The duplicate names prove that older

@@ -43,10 +43,14 @@ export const VideoMemory = () => {
 
   return (
     <div className="flex w-full items-start justify-between">
-      <div className="flex items-center space-x-1">
+      <div className="flex items-center space-x-2">
         <span>{t('settings.about.videoMemory')}</span>
-        <Tooltip title={t('settings.about.videoMemoryTip')}>
-          <CircleHelpIcon size={14} className="text-neutral-500" />
+        <Tooltip
+          title={t('settings.about.videoMemoryTip')}
+          className="cursor-pointer text-neutral-500"
+          placement="right"
+        >
+          <CircleHelpIcon size={15} />
         </Tooltip>
       </div>
 

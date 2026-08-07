@@ -438,6 +438,7 @@ package ion
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -453,9 +454,9 @@ func fakeCarveout(t *testing.T, total, alloc, peak uint64, summary string) strin
 		}
 	}
 
-	write("total_mem", itoa(total))
-	write("alloc_mem", itoa(alloc))
-	write("peak", itoa(peak))
+	write("total_mem", strconv.FormatUint(total, 10))
+	write("alloc_mem", strconv.FormatUint(alloc, 10))
+	write("peak", strconv.FormatUint(peak, 10))
 	if summary != "" {
 		write("summary", summary)
 	}
@@ -465,18 +466,6 @@ func fakeCarveout(t *testing.T, total, alloc, peak uint64, summary string) strin
 	t.Cleanup(func() { Root = original })
 
 	return dir
-}
-
-func itoa(v uint64) string {
-	s := ""
-	if v == 0 {
-		return "0"
-	}
-	for v > 0 {
-		s = string(rune('0'+v%10)) + s
-		v /= 10
-	}
-	return s
 }
 
 func TestInitResetsPeakSoTheRequirementCanBeMeasured(t *testing.T) {
@@ -607,7 +596,8 @@ func TestAReadOnlyPeakDoesNotBreakTheEndpoint(t *testing.T) {
 
 func writeCounter(t *testing.T, dir, name string, v uint64) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(itoa(v)), 0o644); err != nil {
+	body := []byte(strconv.FormatUint(v, 10))
+	if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
 		t.Fatalf("write %s: %s", name, err)
 	}
 }
@@ -1201,13 +1191,15 @@ The quiet surface. It never shouts.
 
 **Files:**
 - Modify: `web/src/api/vm.ts`
+- Create: `web/src/pages/desktop/ion-status/model.ts`
 - Create: `web/src/pages/desktop/menu/settings/about/video-memory.tsx`
-- Modify: `web/src/pages/desktop/menu/settings/about/index.tsx`
+- Modify: `web/src/pages/desktop/menu/settings/about/information.tsx`
 - Modify: `web/src/i18n/locales/en.ts`
 
 **Interfaces:**
 - Consumes: `GET /api/vm/ion` from Task 3.
-- Produces: `getIon()` in `@/api/vm.ts`, and the exported `IonStatus` type that Task 6 also uses:
+- Produces: `getIon()` in `@/api/vm.ts`, and the `IonStatus` type in
+  `web/src/pages/desktop/ion-status/model.ts`, which Task 6 also imports:
 
 ```ts
 export type IonStatus = {
@@ -1222,7 +1214,8 @@ export type IonStatus = {
 };
 ```
 
-Put that type in `web/src/pages/desktop/menu/settings/about/video-memory.tsx` and export it. Task 6 imports it from there rather than declaring a second copy.
+The type lives in its own module, not inside a component, because two unrelated
+surfaces consume it. Task 6 adds the rest of the `ion-status` directory.
 
 - [ ] **Step 1: Add the API call**
 
@@ -1248,7 +1241,27 @@ In `web/src/i18n/locales/en.ts`, inside `settings.about`, after `deviceKey`:
         videoMemoryReboot: 'Reboot to reclaim it.',
 ```
 
-- [ ] **Step 3: Write the component**
+- [ ] **Step 3: Write the shared type**
+
+Create `web/src/pages/desktop/ion-status/model.ts`:
+
+```ts
+// The shape of GET /api/vm/ion. Two unrelated surfaces read it - the quiet row
+// in Settings and the desktop gate - so it lives in its own module rather than
+// inside either component.
+export type IonStatus = {
+  total: number;
+  used: number;
+  free: number;
+  usageRate: number;
+  generations: number;
+  reserve: number;
+  measured: boolean;
+  verdict: 'ok' | 'warn' | 'critical' | 'unavailable';
+};
+```
+
+- [ ] **Step 4: Write the component**
 
 Create `web/src/pages/desktop/menu/settings/about/video-memory.tsx`:
 
@@ -1260,16 +1273,7 @@ import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/vm.ts';
 
-export type IonStatus = {
-  total: number;
-  used: number;
-  free: number;
-  usageRate: number;
-  generations: number;
-  reserve: number;
-  measured: boolean;
-  verdict: 'ok' | 'warn' | 'critical' | 'unavailable';
-};
+import type { IonStatus } from '../../../ion-status/model';
 
 function megabytes(bytes: number) {
   return `${Math.round(bytes / (1024 * 1024))} MB`;
@@ -1333,11 +1337,11 @@ export const VideoMemory = () => {
 
 Note the `- 1`: one generation is the live process, so the count of *orphaned* generations is one fewer.
 
-- [ ] **Step 4: Place the row**
+- [ ] **Step 5: Place the row**
 
 In `web/src/pages/desktop/menu/settings/about/information.tsx`, import `VideoMemory` and render it as the last child of the existing `<div className="mt-5 flex w-full flex-col space-y-5">` list, after the device key row.
 
-- [ ] **Step 5: Verify it compiles and lints**
+- [ ] **Step 6: Verify it compiles and lints**
 
 Run:
 
@@ -1347,10 +1351,10 @@ cd web && pnpm build && pnpm lint
 
 Expected: a clean `tsc` pass, a successful Vite build, and no eslint findings.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add web/src/api/vm.ts web/src/pages/desktop/menu/settings/about web/src/i18n/locales/en.ts
+git add web/src/api/vm.ts web/src/pages/desktop/ion-status/model.ts \n        web/src/pages/desktop/menu/settings/about web/src/i18n/locales/en.ts
 git commit -m "Show the carveout in Settings without shouting about it"
 ```
 
@@ -1361,14 +1365,14 @@ git commit -m "Show the carveout in Settings without shouting about it"
 The loud surface. It exists only when something is wrong, and it lands before the stream starts.
 
 **Files:**
-- Create: `web/src/pages/desktop/ion-status/use-ion-status.ts`
+- Create: `web/src/pages/desktop/ion-status/use-ion-status.ts` (`model.ts` already exists from Task 5)
 - Create: `web/src/pages/desktop/ion-status/overlay.tsx`
 - Create: `web/src/pages/desktop/ion-status/index.ts`
 - Modify: `web/src/pages/desktop/index.tsx:86-90`
 - Modify: `web/src/i18n/locales/en.ts`
 
 **Interfaces:**
-- Consumes: `getIon()` from `@/api/vm.ts` and `IonStatus` from Task 5's `video-memory.tsx`.
+- Consumes: `getIon()` from `@/api/vm.ts` and `IonStatus` from `./model`, created in Task 5.
 - Produces: `useIonStatus()` returning `{ status: IonStatus | null; holdStream: boolean; continueAnyway: () => void }`, plus `IonWarningBadge` and `IonCriticalGate`.
 
 - [ ] **Step 1: Add the strings**
@@ -1395,7 +1399,7 @@ import { useEffect, useState } from 'react';
 
 import * as api from '@/api/vm.ts';
 
-import type { IonStatus } from '../menu/settings/about/video-memory';
+import type { IonStatus } from './model';
 
 // The check must land before the stream starts. At the critical verdict, opening
 // the stream is the event that kills the server, so a warning that arrives after
@@ -1450,7 +1454,7 @@ import { useTranslation } from 'react-i18next';
 
 import * as api from '@/api/vm.ts';
 
-import type { IonStatus } from '../menu/settings/about/video-memory';
+import type { IonStatus } from './model';
 
 export function IonWarningBadge({ status }: { status: IonStatus | null }) {
   const { t } = useTranslation();

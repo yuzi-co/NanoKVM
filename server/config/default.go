@@ -33,6 +33,9 @@ var defaultConfig = &Config{
 		LoginLockoutDuration: 0,
 		LoginMaxFailures:     5,
 	},
+	Ion: Ion{
+		ReserveFloor: 12582912,
+	},
 }
 
 func checkDefaultValue() {
@@ -58,6 +61,12 @@ func checkDefaultValue() {
 
 	if instance.Authentication == "" {
 		instance.Authentication = "enable"
+	}
+
+	// A server.yaml written before this feature existed has no ion block, and a
+	// zero floor would report every board as unavailable.
+	if instance.Ion.ReserveFloor == 0 {
+		instance.Ion.ReserveFloor = 12582912
 	}
 
 	instance.Hardware = getHardware()

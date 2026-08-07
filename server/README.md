@@ -54,6 +54,11 @@ security:
    loginMaxFailures:     5,         # The maximum number of continuous failed login attempts allowed per IP before triggering protection. Default is `5`
 
 
+# ION Carveout
+ion:
+    reserveFloor: 12582912    # The assumed cost of starting the stream, in bytes. The server measures the true cost while it runs. It uses the larger of this value and what it has measured. Default is `12582912` (12MB)
+
+
 # WebRTC Traversal Settings
 stun: stun.l.google.com:19302 # The default STUN server address used for NAT hole-punching to establish P2P streams
 turn:

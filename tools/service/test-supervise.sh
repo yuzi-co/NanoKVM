@@ -18,12 +18,14 @@ sed -n '/^# --- cure ---$/,/^# --- end cure ---$/p'       "$SV" > "$WORK/cure.sh
 sed -n '/^# --- escalate ---$/,/^# --- end escalate ---$/p' "$SV" > "$WORK/escalate.sh"
 sed -n '/^# --- count ---$/,/^# --- end count ---$/p' "$SV" > "$WORK/count.sh"
 sed -n '/^# --- act ---$/,/^# --- end act ---$/p' "$SV" > "$WORK/act.sh"
+sed -n '/^# --- ion ---$/,/^# --- end ion ---$/p' "$SV" > "$WORK/ion.sh"
 [ -s "$WORK/decide.sh" ]  || { echo "could not extract the decide block"; exit 1; }
 [ -s "$WORK/backoff.sh" ] || { echo "could not extract the backoff block"; exit 1; }
 [ -s "$WORK/cure.sh" ]    || { echo "could not extract the cure block"; exit 1; }
 [ -s "$WORK/escalate.sh" ] || { echo "could not extract the escalate block"; exit 1; }
 [ -s "$WORK/count.sh" ] || { echo "could not extract the count block"; exit 1; }
 [ -s "$WORK/act.sh" ] || { echo "could not extract the act block"; exit 1; }
+[ -s "$WORK/ion.sh" ] || { echo "could not extract the ion block"; exit 1; }
 
 fails=0
 note() { printf '  %-60s %s\n' "$1" "$2"; [ "$2" = FAIL ] && fails=$((fails + 1)); return 0; }
@@ -410,6 +412,101 @@ got=$(WORK="$WORK" sh -c '
 ')
 [ "$got" = "3" ] && note "five reboot directories are pruned to 3" OK \
                  || note "pruning left $got directories, want 3" FAIL
+
+echo
+echo "===== the carveout is recorded at each restart ====="
+# The carveout erodes with restarts, not with uptime, so the only place this can
+# be measured is here, at the moment a restart happens.
+ion_case() {   # $1 = name, $2 = fixture dir, $3 = expected line, or "" for none
+    : > "$WORK/ion.log"
+    (
+        # ION_DIR is read by the block through its ${ION_DIR:-...} default, so it
+        # is set inside the subshell that sources the block and nowhere else.
+        ION_DIR=$2
+        log() { echo "$*" >> "$WORK/ion.log"; }
+        . "$WORK/ion.sh"
+        ion_line
+    ) 2> "$WORK/ion.err"
+    rc=$?
+    got=$(cat "$WORK/ion.log")
+    err=$(cat "$WORK/ion.err")
+    # Every path through ion_line ends in an explicit `return 0`, and it never
+    # writes to stderr. A guard that has been removed does not just skip a line
+    # - on the zero-total fixture it lets the shell divide by zero, which exits
+    # nonzero and prints to stderr rather than quietly producing empty output.
+    # Checking only the log line would call that "caught" for free and prove
+    # nothing about the guard.
+    if [ "$got" = "$3" ] && [ "$rc" -eq 0 ] && [ -z "$err" ]; then
+        note "$1 -> [$got]" OK
+    else
+        note "$1 -> [$got] rc=$rc err=[$err], want [$3] rc=0" FAIL
+    fi
+}
+
+mkfixture() {   # $1 = dir, $2 = alloc, $3 = total, $4 = generations
+    mkdir -p "$1"
+    echo "$2" > "$1/alloc_mem"
+    echo "$3" > "$1/total_mem"
+    {
+        echo "Details:"
+        i=0
+        while [ "$i" -lt "$4" ]; do
+            echo "               0           294912         8bef4000                1 ISP_SHARED_BUFFER_0"
+            i=$(( i + 1 ))
+        done
+        echo "minimum ion allocate unit = 4096"
+    } > "$1/summary"
+}
+
+mkfixture "$WORK/ion-clean"  19050496 78643200 1
+mkfixture "$WORK/ion-orphan" 49459200 78643200 2
+mkfixture "$WORK/ion-zero"   19050496 0        1
+
+ion_case "a healthy board reports one generation" \
+    "$WORK/ion-clean"  "ion 19050496/78643200 24% gen=1"
+ion_case "an orphaned generation is counted" \
+    "$WORK/ion-orphan" "ion 49459200/78643200 62% gen=2"
+# ion-absent is deliberately never created by mkfixture. A board without the
+# debugfs entry must write no line at all.
+ion_case "a missing carveout writes nothing" \
+    "$WORK/ion-absent" ""
+ion_case "a zero total writes nothing rather than dividing by it" \
+    "$WORK/ion-zero"   ""
+
+# A summary that cannot be read must not lose the counters.
+rm -f "$WORK/ion-clean/summary"
+ion_case "a missing summary still reports the counters" \
+    "$WORK/ion-clean"  "ion 19050496/78643200 24% gen=0"
+
+# Not in the brief's fixture set: every mkfixture value above is a plain digit
+# string, so a case guard that stopped rejecting non-numeric input would leave
+# every case above unchanged and pass anyway - the debugfs file is text ("carveout
+# heap size:..." on a kernel where the split integer files do not exist), so a
+# malformed total is a real state, not a hypothetical one.
+mkdir -p "$WORK/ion-total-garbage"
+echo 19050496 > "$WORK/ion-total-garbage/alloc_mem"
+echo "carveout heap size:78643200 bytes" > "$WORK/ion-total-garbage/total_mem"
+ion_case "a non-numeric total writes nothing rather than being accepted" \
+    "$WORK/ion-total-garbage" ""
+
+# Anchored to the call site inside full_restart, not to the function name: a
+# grep for "ion_line" alone would also match its own definition, so a function
+# that is defined and never called would pass every case above.
+got=$(sed -n '/^full_restart()/,/^}/p' "$SV" | grep -c '^[[:space:]]*ion_line$')
+[ "$got" = "1" ] && note "full_restart actually calls ion_line" OK \
+                 || note "full_restart calls ion_line $got times, want 1" FAIL
+
+# full_restart is the hang cure, not the common case. A server that simply
+# died is relaunched inline in watch_loop, and that path erodes the carveout
+# exactly the same way - a dead process keeps its whole ION working set
+# whichever path restarts it. Hardware acceptance found this path recording
+# nothing: killing the server and letting it come back through this branch
+# logged no ion line at all. Anchored to the "if action = restart" guard
+# around the direct launch, not to the function name, so this cannot be
+# satisfied by full_restart's own call or by the definition.
+got=$(sed -n '/^[[:space:]]*if \[ "\$(action)" = restart \]; then$/,/^[[:space:]]*fi$/p' "$SV" | grep -c '^[[:space:]]*ion_line$')
+[ "$got" = "1" ] && note "the inline restart branch actually calls ion_line" OK \
+                 || note "the inline restart branch calls ion_line $got times, want 1" FAIL
 
 echo
 echo "===== the script still parses ====="

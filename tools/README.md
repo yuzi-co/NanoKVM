@@ -327,6 +327,31 @@ seconds, because a capture that wedges would mean the board never reboots.
 Nothing in the capture reads `/proc/cvitek/vb`. That file blocks forever in
 uninterruptible sleep and the reader cannot be killed.
 
+### What the carveout held at each restart
+
+The supervisor is the only component that outlives the server. It is
+therefore the only place that can record what the carveout held at a
+restart. It writes one line to `SUPERVISE_LOG` at the start of every restart,
+before `S95nanokvm` touches anything:
+
+```
+2026-08-07 09:14:22 ion 31600640/78643200 40% gen=2
+```
+
+The fields are bytes allocated, bytes total, the percentage used, and `gen`,
+the count of `ISP_SHARED_BUFFER_0` entries in the carveout's own summary. The
+carveout erodes with restarts, not with uptime. A dead process keeps its
+whole ION working set, because the buffers belong to the kernel driver
+rather than to the process. A `gen` value above 1 means an earlier restart
+already orphaned a generation that nothing has freed.
+
+The reader touches only `alloc_mem`, `total_mem` and `summary` under
+`/sys/kernel/debug/ion/cvi_carveout_heap_dump`. It never reads
+`/proc/cvitek/vb`, for the same reason nothing else in this script does. That
+file blocks forever in uninterruptible sleep. A supervisor that could wedge
+would defeat the escalation feature that it carries. A board without the debugfs
+entry, or with a total of zero, writes no line at all rather than a wrong one.
+
 ```shell
 sh tools/service/test-supervise.sh            # the decisions
 sh tools/service/test-supervise-mutation.sh   # proves those cases can fail

@@ -359,6 +359,38 @@ capture_bounded() {   # $1 = reason
     return 0
 }
 
+# --- ion ---
+# The carveout erodes with server restarts, not with uptime and not with capture
+# cycles. A dead process keeps its whole ION working set - the buffers belong to
+# the soph_* drivers, not to the process file descriptors - so every restart
+# orphans a generation and allocates a second copy. Nothing in userspace frees
+# it. Only a reboot does.
+#
+# The supervisor is the only component that outlives the server, so this is the
+# only place the state at a restart can be recorded.
+#
+# Never read /proc/cvitek/vb here. It blocks forever in uninterruptible sleep and
+# the reader cannot be killed. The files below are integers and a text table.
+ION_DIR=${ION_DIR:-/sys/kernel/debug/ion/cvi_carveout_heap_dump}
+
+ion_line() {
+    [ -r "$ION_DIR/alloc_mem" ] || return 0
+
+    used=$(cat "$ION_DIR/alloc_mem" 2>/dev/null)
+    total=$(cat "$ION_DIR/total_mem" 2>/dev/null)
+
+    case "$used"  in ''|*[!0-9]*) return 0 ;; esac
+    case "$total" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$total" -gt 0 ] || return 0
+
+    gen=$(grep -c 'ISP_SHARED_BUFFER_0' "$ION_DIR/summary" 2>/dev/null)
+    case "$gen" in ''|*[!0-9]*) gen=0 ;; esac
+
+    log "ion $used/$total $(( used * 100 / total ))% gen=$gen"
+    return 0
+}
+# --- end ion ---
+
 escalate() {   # $1 = reason
     if [ "${NO_REBOOT:-0}" = 1 ]; then
         log "would reboot ($1), but SUPERVISE_NO_REBOOT is set"
@@ -468,6 +500,7 @@ wait_gone() {
 }
 
 full_restart() {
+    ion_line
     setsid sh -c '/etc/init.d/S95nanokvm restart > /tmp/supervise-restart.log 2>&1' \
         < /dev/null > /dev/null 2>&1 &
 }
@@ -590,6 +623,12 @@ watch_loop() {
                 # Check again: a restart in progress may have started it while
                 # this was waiting.
                 if [ "$(action)" = restart ]; then
+                    # The ordinary case, not the hang cure - a dead process
+                    # keeps its whole ION working set however its replacement
+                    # is started, so this path erodes the carveout exactly
+                    # like full_restart does, and it is the one taken far more
+                    # often.
+                    ion_line
                     "$SERVER_BIN" < /dev/null >> "$SERVER_LOG" 2>&1 &
                     log "started $SERVER_BIN as pid $!"
                 fi

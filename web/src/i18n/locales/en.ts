@@ -768,6 +768,7 @@ const en = {
       expand: 'Expand Menu'
     },
     ion: {
+      checking: 'Checking video memory before starting the stream...',
       warn: 'Video memory is low. One server restart would exhaust it. Reboot when convenient.',
       criticalTitle: 'Not enough video memory to start the stream',
       criticalBody:

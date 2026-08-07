@@ -12,7 +12,7 @@ import { Head } from '@/components/head.tsx';
 
 import { CaptureStatusOverlay, useCaptureStatus } from './capture-status';
 import { AbsoluteMouseWarning } from './hid-status';
-import { IonCriticalGate, IonWarningBadge, useIonStatus } from './ion-status';
+import { IonCheckingIndicator, IonCriticalGate, IonWarningBadge, useIonStatus } from './ion-status';
 import { Keyboard } from './keyboard';
 import { Menu } from './menu';
 import { Mouse } from './mouse';
@@ -88,8 +88,12 @@ export const Desktop = () => {
               <Splitter.Panel min="45%">
                 <div className="relative h-full min-h-0 w-full min-w-0 overflow-hidden bg-black">
                   {ion.holdStream ? (
-                    ion.status?.verdict === 'critical' && (
-                      <IonCriticalGate onContinue={ion.continueAnyway} />
+                    ion.loading ? (
+                      <IonCheckingIndicator />
+                    ) : (
+                      ion.status?.verdict === 'critical' && (
+                        <IonCriticalGate onContinue={ion.continueAnyway} />
+                      )
                     )
                   ) : (
                     <>

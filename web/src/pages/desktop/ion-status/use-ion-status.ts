@@ -41,6 +41,7 @@ export function useIonStatus() {
 
   return {
     status,
+    loading,
     holdStream,
     continueAnyway: () => setOverridden(true)
   };

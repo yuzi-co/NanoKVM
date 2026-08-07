@@ -60,7 +60,7 @@ type Ion struct {
 	//
 	// An earlier value of 24MB was the cost of a whole capture session, which
 	// graded a healthy board amber: `ok` needs twice this much free, and twice
-	// 24MB is 61% of the 75MB carveout, so a board with video running could
+	// 24MB is 64% of the 75MB carveout, so a board with video running could
 	// never reach it.
 	ReserveFloor uint64 `yaml:"reserveFloor"`
 }

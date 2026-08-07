@@ -76,10 +76,12 @@ func TestReadMeasuresTheReserveFromPeakGrowth(t *testing.T) {
 // measurement is a lower bound over the paths exercised so far, not an upper
 // bound, so a smaller-than-floor measurement must not replace the floor.
 //
-// One full capture session measured 23,891,968 bytes on hardware, which is
-// just under the 24MB floor. A board that has exercised only the paths seen
-// so far therefore keeps the floor, and that is intended: the measurement
-// cannot bound a path the board has not used yet.
+// The floor this test passes to Init is 24MB, which was the shipped default
+// until the branch measured what starting the stream really costs and moved it
+// to 12MB. The number here is only a fixture: Init takes the floor as a
+// parameter, so the case is about the comparison, not about the value the
+// device ships. It stays at 24MB because the growth staged below has to sit
+// under whatever floor the case uses.
 func TestTheFloorWinsWhileTheMeasurementIsBelowIt(t *testing.T) {
 	dir := fakeCarveout(t, 78643200, 19050496, 19050496, summaryIdle)
 	Init(25165824)

@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw'
 
 // Flip this to exercise each ION verdict against the desktop gate and badge:
 // 'ok' | 'warn' | 'critical' | 'unavailable'.
-const ION_VERDICT = 'critical'
+const ION_VERDICT = 'ok'
 
 export const handlers = [
   http.post('/api/auth/login', () => {

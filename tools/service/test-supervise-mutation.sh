@@ -142,6 +142,33 @@ mutate "any healthy verdict clears the counters" 's/if \[ "\$2" = yes \]/if true
 mutate "a verdict other than healthy clears" '/^        \*)/{N;s/echo no/echo yes/}'
 
 echo
+echo "== the ion line, which is the only record of what a restart erodes"
+# ion_line is called from full_restart, before the restart it precedes changes
+# anything. These mutations use # as the sed delimiter rather than the | the
+# brief's own text uses inline: the shipped guards contain a literal || and a
+# literal case pattern built on |, and a | delimiter around either one is not
+# an expression sed can parse - it errors out and mutate() would report a
+# BROKEN MUTATION for the wrong reason.
+#
+# "the readable guard is dropped" is deliberately not one of these. Removing
+# `[ -r "$ION_DIR/alloc_mem" ] || return 0` is unobservable: every path that
+# guard exists for - the file missing, unreadable, or a directory - still
+# leaves `used` empty after `cat ... 2>/dev/null`, and the numeric guard two
+# lines later returns 0 on that empty value exactly the same way. No fixture
+# built from files this suite can create tells the two versions apart, so no
+# mutation of that line is included here.
+mutate "a non-numeric total is accepted" \
+    's#case "\$total" in .*#case "\$total" in esac#'
+mutate "a zero total is divided by" \
+    's#\[ "\$total" -gt 0 \] || return 0#:#'
+mutate "the generation buffer name is wrong" \
+    's|ISP_SHARED_BUFFER_0|ISP_SHARED_BUFFER_1|'
+mutate "the percentage is computed from the wrong operand" \
+    's|used \* 100 / total|total \* 100 / used|'
+mutate "full_restart stops calling ion_line" \
+    's|^\([[:space:]]*\)ion_line$|\1:|'
+
+echo
 if [ "$fails" -eq 0 ]; then
     echo "===== every mutation was caught ====="
 else

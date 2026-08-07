@@ -143,12 +143,18 @@ mutate "a verdict other than healthy clears" '/^        \*)/{N;s/echo no/echo ye
 
 echo
 echo "== the ion line, which is the only record of what a restart erodes"
-# ion_line is called from full_restart, before the restart it precedes changes
-# anything. These mutations use # as the sed delimiter rather than the | the
-# brief's own text uses inline: the shipped guards contain a literal || and a
-# literal case pattern built on |, and a | delimiter around either one is not
-# an expression sed can parse - it errors out and mutate() would report a
-# BROKEN MUTATION for the wrong reason.
+# ion_line is called from two places, and both matter. full_restart is the
+# hang cure; the inline launch in watch_loop's `restart)` arm is the ordinary
+# case, a server that simply died - and hardware acceptance found exactly
+# that path recording nothing, because only full_restart had the call. A dead
+# process keeps its whole ION working set whichever path relaunches it, so
+# both restarts erode the carveout the same way and both need the line.
+#
+# These mutations use # as the sed delimiter rather than the | the brief's own
+# text uses inline: the shipped guards contain a literal || and a literal case
+# pattern built on |, and a | delimiter around either one is not an expression
+# sed can parse - it errors out and mutate() would report a BROKEN MUTATION
+# for the wrong reason.
 #
 # "the readable guard is dropped" is deliberately not one of these. Removing
 # `[ -r "$ION_DIR/alloc_mem" ] || return 0` is unobservable: every path that
@@ -165,8 +171,17 @@ mutate "the generation buffer name is wrong" \
     's|ISP_SHARED_BUFFER_0|ISP_SHARED_BUFFER_1|'
 mutate "the percentage is computed from the wrong operand" \
     's|used \* 100 / total|total \* 100 / used|'
+# The two calls sit at different nesting depths - full_restart's is one level
+# in, at 4 spaces; the inline launch is five levels in, inside watch_loop's
+# while loop, case arm and if guard, at 20 spaces - so matching the exact
+# indentation hits one site and not the other. A single pattern that matched
+# any indentation (`^[[:space:]]*ion_line$`) would delete both calls at once:
+# still caught, but it would prove neither site individually, which is the gap
+# this file's own history already has one example of.
 mutate "full_restart stops calling ion_line" \
-    's|^\([[:space:]]*\)ion_line$|\1:|'
+    's|^    ion_line$|    :|'
+mutate "the inline restart branch stops calling ion_line" \
+    's|^                    ion_line$|                    :|'
 
 echo
 if [ "$fails" -eq 0 ]; then

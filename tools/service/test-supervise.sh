@@ -496,6 +496,18 @@ got=$(sed -n '/^full_restart()/,/^}/p' "$SV" | grep -c '^[[:space:]]*ion_line$')
 [ "$got" = "1" ] && note "full_restart actually calls ion_line" OK \
                  || note "full_restart calls ion_line $got times, want 1" FAIL
 
+# full_restart is the hang cure, not the common case. A server that simply
+# died is relaunched inline in watch_loop, and that path erodes the carveout
+# exactly the same way - a dead process keeps its whole ION working set
+# whichever path restarts it. Hardware acceptance found this path recording
+# nothing: killing the server and letting it come back through this branch
+# logged no ion line at all. Anchored to the "if action = restart" guard
+# around the direct launch, not to the function name, so this cannot be
+# satisfied by full_restart's own call or by the definition.
+got=$(sed -n '/^[[:space:]]*if \[ "\$(action)" = restart \]; then$/,/^[[:space:]]*fi$/p' "$SV" | grep -c '^[[:space:]]*ion_line$')
+[ "$got" = "1" ] && note "the inline restart branch actually calls ion_line" OK \
+                 || note "the inline restart branch calls ion_line $got times, want 1" FAIL
+
 echo
 echo "===== the script still parses ====="
 sh -n "$SV" && note "S98supervise is valid shell" OK || note "S98supervise does not parse" FAIL

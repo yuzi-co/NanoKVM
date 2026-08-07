@@ -56,7 +56,7 @@ security:
 
 # ION Carveout
 ion:
-    reserveFloor: 25165824    # The assumed cost of one capture session, in bytes. The server measures the true cost while it runs. It uses the larger of this value and what it has measured. Default is `25165824` (24MB)
+    reserveFloor: 12582912    # The assumed cost of starting the stream, in bytes. The server measures the true cost while it runs. It uses the larger of this value and what it has measured. Default is `12582912` (12MB)
 
 
 # WebRTC Traversal Settings

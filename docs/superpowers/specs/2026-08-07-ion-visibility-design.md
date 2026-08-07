@@ -118,10 +118,22 @@ Do not read `/proc/cvitek/vb`. That file blocks the reader forever in uninterrup
   warns earlier than strictly necessary and costs a reboot the operator did not have to make.
   Take the larger value.
 
-  One consequence is worth stating plainly: one full measured session, 23,891,968, is just
-  under the 24MB floor. On a board that exercises only the paths measured so far, the floor
-  stays operative and `measured` stays false. That is correct behaviour, not a dead feature —
-  a board that streams and screenshots and serves MJPEG will exceed it.
+  One consequence is worth stating plainly: on a board that exercises only the paths measured
+  so far, the floor stays operative and `measured` stays false. That is correct behaviour, not
+  a dead feature — a board that streams and screenshots and serves MJPEG will exceed it.
+
+  **The floor is 12MB, corrected from 24MB after hardware acceptance on 2026-08-07.** The
+  original value was the cost of a whole capture session. That graded a healthy board amber:
+  `ok` requires twice the reserve to be free, twice 24MB is 61% of the 75MB carveout, and one
+  healthy streaming session already holds 30,392,320 — so a board with video running could
+  never reach `ok`, and the warning was permanently on. A warning that never turns off is a
+  warning nobody reads.
+
+  12MB is the cost of the event the verdict actually gates: starting the stream. Opening a
+  stream on a fresh board took the carveout from 19,050,496 to 30,392,320, so one stream start
+  costs 11,341,824. That also makes the `warn` band read correctly against its own copy —
+  `warn` says one server restart would exhaust the memory, and a restart costs 6,516,736 in
+  orphaned buffers plus 11,341,824 to open the stream again, which is close to twice 12MB.
 - `verdict` compares `free` against `reserve`.
 
 The design reports `generations` and not "orphaned bytes". The duplicate names prove that older
@@ -183,12 +195,12 @@ with the `usage rate:40%` line that `summary` prints. `verdict` is one of `ok`, 
 
 ### Configuration
 
-`server.yaml` gains one optional block. The floor applies only before the first capture, when
-`peak` has nothing to report yet.
+`server.yaml` gains one optional block. The server uses the larger of this floor and the growth
+it has measured, so the floor stays operative whenever the measured growth is smaller.
 
 ```yaml
 ion:
-    reserveFloor: 25165824   # 24MB, used until this process has captured once
+    reserveFloor: 12582912   # 12MB, the assumed cost of starting the stream
 ```
 
 ### Web UI

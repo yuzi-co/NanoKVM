@@ -53,9 +53,15 @@ type Security struct {
 
 // Ion configures how the carveout is graded.
 type Ion struct {
-	// ReserveFloor is the assumed cost of one capture session, in bytes, used
-	// until this process has been observed needing more. 24MB: one measured
-	// session allocated 23,891,968 bytes on hardware.
+	// ReserveFloor is the assumed cost of starting the stream, in bytes, used
+	// until this process has been observed needing more. 12MB: opening a stream
+	// on a fresh board took the carveout from 19,050,496 to 30,392,320, so one
+	// stream start costs 11,341,824 bytes.
+	//
+	// An earlier value of 24MB was the cost of a whole capture session, which
+	// graded a healthy board amber: `ok` needs twice this much free, and twice
+	// 24MB is 61% of the 75MB carveout, so a board with video running could
+	// never reach it.
 	ReserveFloor uint64 `yaml:"reserveFloor"`
 }
 

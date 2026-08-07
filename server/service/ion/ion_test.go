@@ -134,6 +134,56 @@ func TestReadReportsTheDerivedFields(t *testing.T) {
 	}
 }
 
+// TestReadReportsCritical is the one mutation this feature must never survive:
+// a hard-coded VerdictOK in Read passes every other test in this package, but
+// verdict == "critical" is the sole input to the desktop stream gate, so an
+// always-healthy Read would ship silently. free (7,864,320) is below the
+// floor (25,165,824) here, so the assertion depends on Verdict actually being
+// called, not on the argument order Verdict itself already pins.
+func TestReadReportsCritical(t *testing.T) {
+	fakeCarveout(t, 78643200, 70778880, 70778880, summaryIdle)
+	Init(25165824)
+
+	got := Read()
+
+	if got.Verdict != VerdictCritical {
+		t.Fatalf("Verdict = %q, want %q", got.Verdict, VerdictCritical)
+	}
+}
+
+// TestReadReportsWarn covers the middle band: free (38,643,200) sits between
+// the floor and twice the floor, so Read must reach the warn branch of
+// Verdict and not just the ok/critical extremes the other fixtures exercise.
+func TestReadReportsWarn(t *testing.T) {
+	fakeCarveout(t, 78643200, 40000000, 40000000, summaryIdle)
+	Init(25165824)
+
+	got := Read()
+
+	if got.Verdict != VerdictWarn {
+		t.Fatalf("Verdict = %q, want %q", got.Verdict, VerdictWarn)
+	}
+}
+
+// TestATornReadClampsFreeAndUsageRate covers the used <= total guard added in
+// response to a review minor. total_mem and alloc_mem are two separate,
+// non-atomic reads of files the kernel can update between them, so a torn
+// read can briefly report used > total; without the guard, Free underflows
+// and UsageRate divides out to something other than the clamped 100.
+func TestATornReadClampsFreeAndUsageRate(t *testing.T) {
+	fakeCarveout(t, 78643200, 78643201, 78643201, summaryIdle)
+	Init(25165824)
+
+	got := Read()
+
+	if got.Free != 0 {
+		t.Fatalf("Free = %d, want 0 when a torn read reports used > total", got.Free)
+	}
+	if got.UsageRate != 100 {
+		t.Fatalf("UsageRate = %d, want 100 when a torn read reports used > total", got.UsageRate)
+	}
+}
+
 func TestReadCountsTheOrphanedGeneration(t *testing.T) {
 	fakeCarveout(t, 78643200, 49459200, 49459200, summaryTwoGenerations)
 	Init(25165824)

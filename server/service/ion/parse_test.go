@@ -3,8 +3,11 @@ package ion
 import "testing"
 
 // summaryIdle is a fresh boot with capture never started. It keeps the trailing
-// "free memory regions" block, which proves the parser stops at the end of the
-// Details table instead of reading rows out of it.
+// "free memory regions" block because that block is what the device really
+// prints after the Details table. Its rows have 4 whitespace-separated fields,
+// never 5, so the existing column-count guard filters them out regardless of
+// whether the "minimum ion allocate unit" break fires — this fixture does not
+// exercise that break. See summarySyntheticTrailer for a fixture that does.
 const summaryIdle = `Summary:
 [0] carveout heap size:78643200 bytes, used:19050496 bytes
 usage rate:25%, memory usage peak 19050496 bytes
@@ -47,6 +50,25 @@ Details:
 
 
 minimum ion allocate unit = 4096
+`
+
+// summarySyntheticTrailer is constructed, not a device capture. It exists to
+// exercise the "minimum ion allocate unit" terminator: the row after that line
+// has exactly 5 whitespace-separated fields, the same field count as a real
+// Details row, so it would parse as a second buffer if the terminator break
+// were ever removed. A trailer shaped like the real "free memory regions"
+// block (4 fields) would not catch that regression, because the pre-existing
+// column-count guard filters 4-field rows on its own.
+const summarySyntheticTrailer = `Summary:
+[0] carveout heap size:78643200 bytes, used:12533760 bytes
+usage rate:16%, memory usage peak 12533760 bytes
+
+Details:
+         heap_id   alloc_buf_size         phy_addr         kmap_cnt      buffer name
+               0         12533760         8b300000                1          VbPool0
+
+minimum ion allocate unit = 4096
+               1              999         deadbeef                9        FakeTrailer
 `
 
 func TestParseCounter(t *testing.T) {
@@ -102,6 +124,24 @@ func TestParseSummaryReadsOnlyTheDetailsTable(t *testing.T) {
 		if bufs[i] != want[i] {
 			t.Fatalf("buffer %d = %+v, want %+v", i, bufs[i], want[i])
 		}
+	}
+}
+
+// TestParseSummaryStopsAtTheTerminator fails if the "minimum ion allocate
+// unit" break is ever removed from ParseSummary: without it, the 5-field row
+// in summarySyntheticTrailer parses as a second buffer and this test sees 2
+// instead of 1.
+func TestParseSummaryStopsAtTheTerminator(t *testing.T) {
+	bufs, err := ParseSummary(summarySyntheticTrailer)
+	if err != nil {
+		t.Fatalf("ParseSummary: %s", err)
+	}
+	if len(bufs) != 1 {
+		t.Fatalf("got %d buffers, want 1 (the terminator must stop the scan): %+v", len(bufs), bufs)
+	}
+	want := Buffer{HeapID: 0, Size: 12533760, PhyAddr: "8b300000", Name: "VbPool0"}
+	if bufs[0] != want {
+		t.Fatalf("buffer 0 = %+v, want %+v", bufs[0], want)
 	}
 }
 

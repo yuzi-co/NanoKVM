@@ -58,6 +58,13 @@ func (k *KvmVision) SetHDMI(enable bool) int {
 	return 0
 }
 
+// HasHDMISignal answers false off-device. There is no capture hardware to ask,
+// and a stub that claimed a signal would make every test that reads the HDMI
+// state assert against a picture that is not there.
+func (k *KvmVision) HasHDMISignal() bool {
+	return false
+}
+
 func (k *KvmVision) SetGop(gop uint8) {}
 
 func (k *KvmVision) SetFrameDetect(frame uint8) {}

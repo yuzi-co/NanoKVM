@@ -64,12 +64,10 @@ func (s *Service) DisableHdmi(c *gin.Context) {
 
 func (s *Service) GetHdmiState(c *gin.Context) {
 	var rsp proto.Response
-	enabled := !isHdmiDisabled()
-
 	// With capture switched off nothing refreshes the signal state, so the
-	// file holds whatever was true when it was last running. Report no signal
-	// rather than that stale value.
-	enabled := !utils.IsHdmiDisabled()
+	// library holds whatever was true when it was last running. Report no
+	// signal rather than that stale value.
+	enabled := !isHdmiDisabled()
 
 	rsp.OkRspWithData(c, &proto.GetGetHdmiStateRsp{
 		Enabled:     enabled,

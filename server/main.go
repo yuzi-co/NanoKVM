@@ -37,6 +37,13 @@ func initialize() {
 
 	logger.Init()
 
+	// Record the carveout baseline and reset the peak watermark here, before
+	// the first call that can allocate from it. common.GetScreen() below
+	// reaches libkvm's sync.Once init, so a baseline recorded any later would
+	// already include this process's own capture working set and understate
+	// what a restart re-pays - the direction the design calls fatal.
+	ion.Init(config.GetInstance().Ion.ReserveFloor)
+
 	// restore the memory limit the user configured, which is otherwise only
 	// applied to the process that set it and lost on the next boot
 	utils.InitGoMemLimit()
@@ -82,10 +89,6 @@ func initialize() {
 
 func run() {
 	conf := config.GetInstance()
-
-	// Record the carveout baseline and reset the peak watermark before anything
-	// captures, so that later readings measure what this process needed.
-	ion.Init(conf.Ion.ReserveFloor)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

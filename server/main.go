@@ -38,10 +38,11 @@ func initialize() {
 	logger.Init()
 
 	// Record the carveout baseline and reset the peak watermark here, before
-	// the first call that can allocate from it. common.GetScreen() below
-	// reaches libkvm's sync.Once init, so a baseline recorded any later would
-	// already include this process's own capture working set and understate
-	// what a restart re-pays - the direction the design calls fatal.
+	// the first call that can allocate from it. That call is
+	// vm.EnableHdmiCapture() below, which reaches libkvm through
+	// common.GetKvmVision(); a baseline recorded any later would already
+	// include this process's own capture working set and understate what a
+	// restart re-pays - the direction the design calls fatal.
 	ion.Init(config.GetInstance().Ion.ReserveFloor)
 
 	// restore the memory limit the user configured, which is otherwise only

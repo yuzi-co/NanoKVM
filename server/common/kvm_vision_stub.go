@@ -72,15 +72,3 @@ func (k *KvmVision) SetFrameDetect(frame uint8) {}
 func (k *KvmVision) Close() {
 	captureLifecycle.stop(func() {})
 }
-
-func (k *KvmVision) StopCapture() {
-	captureLifecycle.stop(func() {})
-}
-
-func (k *KvmVision) ResumeCapture() {
-	captureLifecycle.resume(func() {})
-}
-
-func (k *KvmVision) IsCapturing() bool {
-	return captureLifecycle.isLive()
-}

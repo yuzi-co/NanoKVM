@@ -179,25 +179,13 @@ func (k *KvmVision) Close() {
 	log.Debugf("stop kvm vision...")
 }
 
-// StopCapture releases the capture pipeline. kvmv_deinit joins libkvm's two
-// threads, destroys vi_mutex, closes the camera and frees every buffer, so no
-// read may be in flight - the gate guarantees that.
-func (k *KvmVision) StopCapture() {
-	captureLifecycle.stop(func() {
-		C.kvmv_deinit()
-		log.Debugf("capture pipeline released")
-	})
-}
-
-// ResumeCapture builds the pipeline again. kvmv_init is the counterpart of
-// kvmv_deinit and recreates the mutex, reopens the camera and restarts both
-// threads; the "auto init" the header describes for kvmv_read_img is only the
-// first-time path and does not undo a deinit.
-func (k *KvmVision) ResumeCapture() {
-	captureLifecycle.resume(resumeCapture)
-}
-
-// IsCapturing reports whether the pipeline is currently built.
-func (k *KvmVision) IsCapturing() bool {
-	return captureLifecycle.isLive()
-}
+// There used to be StopCapture, ResumeCapture and IsCapturing here. Their only
+// caller was service/vm/hdmi_idle.go, which stopped capture after an idle
+// timeout, and the 2026-08-01 rebase dropped that file - so the three methods
+// survived their consumer by months with nothing calling them.
+//
+// The gate itself stays: Close goes through it, and withRead rebuilds the
+// pipeline for a reader that arrives after a stop. Restoring the idle timeout
+// means restoring hdmi_idle.go from backup/pre-rebase-20260801 and adding these
+// three back on top of captureLifecycle.stop / .resume / .isLive, which are
+// still there.

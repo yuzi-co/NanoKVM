@@ -315,6 +315,12 @@ const en = {
         image: 'Image Version',
         imageTip: 'NanoKVM system image version',
         deviceKey: 'Device Key',
+        videoMemory: 'Video Memory',
+        videoMemoryTip:
+          'Memory reserved for video capture. It is not shared with the rest of the system.',
+        videoMemoryGenerations_one: '{{count}} server restart is holding video memory',
+        videoMemoryGenerations_other: '{{count}} server restarts are holding video memory',
+        videoMemoryReboot: 'Reboot to reclaim it.',
         community: 'Community',
         hostname: 'Hostname',
         hostnameUpdated: 'Hostname updated. Reboot to apply.',

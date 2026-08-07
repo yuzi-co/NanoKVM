@@ -14,6 +14,11 @@ import (
 // killed.
 var Root = "/sys/kernel/debug/ion/cvi_carveout_heap_dump"
 
+// writeFile is a variable so a test can make the peak reset fail while the
+// counter stays readable. The container that runs the tests is root, and root
+// ignores the write bit, so the failure cannot be staged on the filesystem.
+var writeFile = os.WriteFile
+
 // Status is one reading of the carveout.
 type Status struct {
 	Total       uint64
@@ -63,7 +68,7 @@ func Init(floor uint64) {
 	allocAtStart = alloc
 	baselineOK = true
 
-	if err := os.WriteFile(filepath.Join(Root, "peak"), []byte("0"), 0o644); err == nil {
+	if err := writeFile(filepath.Join(Root, "peak"), []byte("0"), 0o644); err == nil {
 		peakReset = true
 	}
 }
@@ -81,11 +86,17 @@ func Read() Status {
 		return Status{Verdict: VerdictUnavailable}
 	}
 
+	// total_mem and alloc_mem are two separate, non-atomic reads of files the
+	// kernel can update between them, so a torn read can briefly report used >
+	// total. Guard and clamp the same way in both derived fields rather than
+	// letting one of them show a value a torn read cannot actually produce.
 	status := Status{Total: total, Used: used}
 	if used <= total {
 		status.Free = total - used
+		status.UsageRate = int(used * 100 / total)
+	} else {
+		status.UsageRate = 100
 	}
-	status.UsageRate = int(used * 100 / total)
 
 	if body, err := os.ReadFile(filepath.Join(Root, "summary")); err == nil {
 		if buffers, err := ParseSummary(string(body)); err == nil {

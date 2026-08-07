@@ -93,15 +93,23 @@ func Read() Status {
 		}
 	}
 
-	// The floor stands until this process has been observed needing more. Once
-	// a real measurement exists it replaces the floor outright, even when the
-	// observed growth is smaller than the floor: the floor is a pessimistic
-	// stand-in for the unmeasured case, not a minimum on the measured one.
+	// peak - base is a high-water mark over the delivery paths this process
+	// has actually exercised so far, not over every path it could exercise. It
+	// is a lower bound on the true requirement, not an upper bound: a board
+	// that has only ever served screenshots will measure less than it needs
+	// the moment someone opens an H264 stream. Reporting that measurement on
+	// its own would let the verdict read "ok" right up to the allocation that
+	// segfaults the server, which is the failure this package exists to catch
+	// early. So the floor stands until a measurement is seen to exceed it, and
+	// Reserve is effectively max(measured, floor): understating the reserve is
+	// fatal, overstating it only costs an earlier warning.
 	status.Reserve = floor
 	if haveBase && reset {
 		if peak, err := readCounter("peak"); err == nil && peak > base {
-			status.Reserve = peak - base
-			status.Measured = true
+			if growth := peak - base; growth > floor {
+				status.Reserve = growth
+				status.Measured = true
+			}
 		}
 	}
 

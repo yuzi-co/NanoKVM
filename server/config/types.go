@@ -11,6 +11,7 @@ type Config struct {
 	Stun           string   `yaml:"stun"`
 	Turn           Turn     `yaml:"turn"`
 	Security       Security `yaml:"security"`
+	Ion            Ion      `yaml:"ion"`
 	// Proxy reaches the internet through an intermediary. A complete URL or a
 	// bare host:port. Empty means the environment decides.
 	Proxy string `yaml:"proxy"`
@@ -48,6 +49,14 @@ type Turn struct {
 type Security struct {
 	LoginLockoutDuration int `yaml:"loginLockoutDuration"`
 	LoginMaxFailures     int `yaml:"loginMaxFailures"`
+}
+
+// Ion configures how the carveout is graded.
+type Ion struct {
+	// ReserveFloor is the assumed cost of one capture session, in bytes, used
+	// until this process has been observed needing more. 24MB: one measured
+	// session allocated 23,891,968 bytes on hardware.
+	ReserveFloor uint64 `yaml:"reserveFloor"`
 }
 
 type Hardware struct {

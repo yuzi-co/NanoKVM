@@ -1,6 +1,7 @@
 package ion
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,8 +52,11 @@ func TestReadMeasuresTheReserveFromPeakGrowth(t *testing.T) {
 	dir := fakeCarveout(t, 78643200, 19050496, 19050496, summaryIdle)
 	Init(25165824)
 
-	// The board captures a stream on top of what it already held: alloc and
-	// peak both reach the two-generation value.
+	// 19050496 and 49459200 are both genuine captures, but of different
+	// physical events - the second includes an orphaned generation from a
+	// restart, not a single measured session. The pairing is constructed only
+	// to put growth (30408704) above the floor and exercise that branch; it
+	// was never itself observed as one measurement.
 	writeCounter(t, dir, "alloc_mem", 49459200)
 	writeCounter(t, dir, "peak", 49459200)
 
@@ -169,7 +173,41 @@ func TestAMissingSummaryStillReportsTheCounters(t *testing.T) {
 	}
 }
 
+// TestAReadOnlyPeakDoesNotBreakTheEndpoint isolates Init's write-failure
+// handling specifically. peak stays a normal, readable file holding a value
+// whose growth would exceed the floor if Read got to see it - the only thing
+// that fails is the write inside Init, staged through the writeFile seam
+// rather than a filesystem permission, because root ignores the write bit and
+// a directory-shaped peak fails the later read too, which would let this test
+// pass even if Init did not check the write's error at all.
 func TestAReadOnlyPeakDoesNotBreakTheEndpoint(t *testing.T) {
+	// alloc_mem/peak both start at a value whose eventual growth, if measured,
+	// would exceed the floor - so if the reset failure were ignored and Read
+	// still measured from it, this test would catch that too.
+	fakeCarveout(t, 78643200, 19050496, 49459200, summaryIdle)
+
+	original := writeFile
+	writeFile = func(string, []byte, os.FileMode) error { return errors.New("read-only peak") }
+	t.Cleanup(func() { writeFile = original })
+
+	Init(25165824)
+	got := Read()
+
+	if got.Verdict == VerdictUnavailable {
+		t.Fatal("Verdict is unavailable, want a graded reading from the floor")
+	}
+	if got.Measured {
+		t.Fatal("Measured = true, want false when peak could not be reset")
+	}
+}
+
+// TestAnUnreadablePeakFallsBackToTheFloor covers the filesystem case: peak
+// exists as a directory instead of a file, so both the write in Init and the
+// later read in Read fail against it. Root ignores the write bit, so a
+// permission-based construction cannot stage a write failure on its own; this
+// is a different, real failure path from a directory-shaped peak, not a
+// substitute for TestAReadOnlyPeakDoesNotBreakTheEndpoint above.
+func TestAnUnreadablePeakFallsBackToTheFloor(t *testing.T) {
 	dir := fakeCarveout(t, 78643200, 19050496, 19050496, summaryIdle)
 	if err := os.Remove(filepath.Join(dir, "peak")); err != nil {
 		t.Fatalf("remove peak: %s", err)

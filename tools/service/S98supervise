@@ -623,6 +623,12 @@ watch_loop() {
                 # Check again: a restart in progress may have started it while
                 # this was waiting.
                 if [ "$(action)" = restart ]; then
+                    # The ordinary case, not the hang cure - a dead process
+                    # keeps its whole ION working set however its replacement
+                    # is started, so this path erodes the carveout exactly
+                    # like full_restart does, and it is the one taken far more
+                    # often.
+                    ion_line
                     "$SERVER_BIN" < /dev/null >> "$SERVER_LOG" 2>&1 &
                     log "started $SERVER_BIN as pid $!"
                 fi

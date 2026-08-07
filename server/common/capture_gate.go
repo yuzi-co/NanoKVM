@@ -85,19 +85,14 @@ func (g *captureGate) stop(deinit func()) {
 	g.live = false
 }
 
-// resume runs init once. The idle timer, a viewer arriving and a request from
-// the UI can all land on this edge together.
-func (g *captureGate) resume(init func()) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if g.live {
-		return
-	}
-
-	init()
-	g.live = true
-}
+// There used to be a resume method and an isLive method here. Both existed for
+// service/vm/hdmi_idle.go, which the 2026-08-01 rebase dropped, and both
+// outlived it with no caller but their own tests.
+//
+// withRead already resumes on its own, which is the path that matters: a viewer
+// arriving after a stop rebuilds the pipeline without anyone asking. Restoring
+// the idle timeout means restoring hdmi_idle.go from backup/pre-rebase-20260801
+// and adding an explicit resume back.
 
 // withLive runs fn only while the pipeline is live, and reports whether it ran.
 // It never rebuilds.
@@ -124,11 +119,3 @@ func (g *captureGate) withLive(fn func()) bool {
 	return true
 }
 
-// isLive reports whether capture is running, for callers that need to answer
-// that without doing a read.
-func (g *captureGate) isLive() bool {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-
-	return g.live
-}

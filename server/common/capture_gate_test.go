@@ -46,8 +46,33 @@ func TestAReadWhileStoppedResumesAndThenReads(t *testing.T) {
 	if len(order) != 2 || order[0] != "resumed" || order[1] != "read" {
 		t.Fatalf("order was %v, want [resumed, read]", order)
 	}
-	if !g.isLive() {
+	if !g.withLive(func() {}) {
 		t.Fatal("capture is not live after a read resumed it")
+	}
+}
+
+// withLive is the guard for the calls that are not reads - the HDMI control,
+// the signal query, the encoder settings. It must refuse while stopped rather
+// than rebuild, because none of those callers is a viewer and none of them
+// should pay for kvmv_init or bring back a pipeline someone asked to release.
+func TestWithLiveRefusesWhileStoppedAndDoesNotRebuild(t *testing.T) {
+	g := newCaptureGate()
+	g.stop(func() {})
+
+	ran := false
+	if g.withLive(func() { ran = true }) {
+		t.Fatal("withLive ran while capture was stopped")
+	}
+	if ran {
+		t.Fatal("withLive called the function while capture was stopped")
+	}
+
+	// The refusal must not have quietly resumed anything: a read arriving now
+	// still has to do the rebuild itself.
+	resumed := false
+	g.withRead(func() { resumed = true }, func() {})
+	if !resumed {
+		t.Fatal("withLive resumed the pipeline behind the caller's back")
 	}
 }
 
@@ -80,33 +105,16 @@ func TestConcurrentReadsResumeOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestResumeLetsReadsThroughAgain(t *testing.T) {
-	g := newCaptureGate()
-	g.stop(func() {})
-	g.resume(func() {})
-
-	if !g.withRead(func() {}, func() {}) {
-		t.Fatal("withRead still refused after a resume")
-	}
-}
-
-// Both transitions have to be idempotent. The idle timer, a viewer arriving and
-// an explicit request from the UI can all land on the same edge, and calling
-// kvmv_deinit twice would destroy an already destroyed mutex.
-func TestStopAndResumeOnlyActOnce(t *testing.T) {
+// The stop has to be idempotent. Close runs it, and a second call must not
+// reach kvmv_deinit again: that would destroy an already destroyed mutex.
+func TestStopOnlyActsOnce(t *testing.T) {
 	g := newCaptureGate()
 
-	stops, resumes := 0, 0
+	stops := 0
 	g.stop(func() { stops++ })
 	g.stop(func() { stops++ })
 	if stops != 1 {
 		t.Errorf("deinit called %d times, want 1", stops)
-	}
-
-	g.resume(func() { resumes++ })
-	g.resume(func() { resumes++ })
-	if resumes != 1 {
-		t.Errorf("init called %d times, want 1", resumes)
 	}
 }
 

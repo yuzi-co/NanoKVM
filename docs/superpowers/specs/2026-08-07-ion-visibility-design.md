@@ -124,7 +124,7 @@ Do not read `/proc/cvitek/vb`. That file blocks the reader forever in uninterrup
 
   **The floor is 12MB, corrected from 24MB after hardware acceptance on 2026-08-07.** The
   original value was the cost of a whole capture session. That graded a healthy board amber:
-  `ok` requires twice the reserve to be free, twice 24MB is 61% of the 75MB carveout, and one
+  `ok` requires twice the reserve to be free, twice 24MB is 64% of the 75MB carveout, and one
   healthy streaming session already holds 30,392,320 — so a board with video running could
   never reach `ok`, and the warning was permanently on. A warning that never turns off is a
   warning nobody reads.

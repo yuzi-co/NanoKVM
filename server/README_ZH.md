@@ -52,6 +52,11 @@ security:
    loginMaxFailures:     5,         # 允许触发保护前，单个 IP 连续登录失败的最大次数。默认为 `5`
 
 
+# ION 预留内存
+ion:
+    reserveFloor: 25165824    # 单次采集会话的预估内存开销（单位：字节）。服务运行期间会持续测量实际开销，仅在尚未进行过采集时使用该预设值。默认为 `25165824`（24MB）
+
+
 # WebRTC 内网穿透
 stun: stun.l.google.com:19302    # 默认使用的 STUN 服务器地址，用于打洞获取公网 IP 建立 P2P 流
 turn:

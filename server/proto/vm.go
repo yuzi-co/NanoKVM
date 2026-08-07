@@ -100,6 +100,17 @@ type GetMemoryLimitRsp struct {
 	Limit   int64 `json:"limit"`
 }
 
+type GetIonRsp struct {
+	Total       uint64 `json:"total"`
+	Used        uint64 `json:"used"`
+	Free        uint64 `json:"free"`
+	UsageRate   int    `json:"usageRate"`
+	Generations int    `json:"generations"`
+	Reserve     uint64 `json:"reserve"`
+	Measured    bool   `json:"measured"`
+	Verdict     string `json:"verdict"`
+}
+
 type SetOledReq struct {
 	Sleep int `validate:"omitempty"`
 }

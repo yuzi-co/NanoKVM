@@ -13,6 +13,7 @@ import (
 	"NanoKVM-Server/logger"
 	"NanoKVM-Server/middleware"
 	"NanoKVM-Server/router"
+	"NanoKVM-Server/service/ion"
 	"NanoKVM-Server/service/stream/webrtc"
 	"NanoKVM-Server/service/vm"
 	"NanoKVM-Server/service/vm/jiggler"
@@ -81,6 +82,10 @@ func initialize() {
 
 func run() {
 	conf := config.GetInstance()
+
+	// Record the carveout baseline and reset the peak watermark before anything
+	// captures, so that later readings measure what this process needed.
+	ion.Init(conf.Ion.ReserveFloor)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

@@ -11,101 +11,41 @@ import (
 // in the C library stops those overlapping, so the exclusion has to happen on
 // this side of the boundary.
 
-func TestAReadRunsWhileCaptureIsLive(t *testing.T) {
+func TestACallRunsWhileCaptureIsLive(t *testing.T) {
 	g := newCaptureGate()
 
 	ran := false
-	if !g.withRead(func() {}, func() { ran = true }) {
-		t.Fatal("withRead refused while capture is live")
+	if !g.withLive(func() { ran = true }) {
+		t.Fatal("withLive refused while capture is live")
 	}
 	if !ran {
-		t.Fatal("withRead did not call the function")
+		t.Fatal("withLive did not call the function")
 	}
 }
 
-// A read while stopped must not reach kvmv_read_img with the mutex destroyed,
-// but refusing it outright is the wrong contract: anything calling read is a
-// viewer, and the only other caller besides the streamers is the loopback
-// screenshot route that PicoClaw and MCP use. Refusing would break screenshots
-// after an idle stop, which work today only because the stop released nothing.
-//
-// So a read rebuilds the pipeline first, under exclusive access, and then reads.
-func TestAReadWhileStoppedResumesAndThenReads(t *testing.T) {
-	g := newCaptureGate()
-	g.stop(func() {})
-
-	var order []string
-	ok := g.withRead(
-		func() { order = append(order, "resumed") },
-		func() { order = append(order, "read") },
-	)
-
-	if !ok {
-		t.Fatal("withRead refused after a stop instead of resuming")
-	}
-	if len(order) != 2 || order[0] != "resumed" || order[1] != "read" {
-		t.Fatalf("order was %v, want [resumed, read]", order)
-	}
-	if !g.withLive(func() {}) {
-		t.Fatal("capture is not live after a read resumed it")
-	}
-}
-
-// withLive is the guard for the calls that are not reads - the HDMI control,
-// the signal query, the encoder settings. It must refuse while stopped rather
-// than rebuild, because none of those callers is a viewer and none of them
-// should pay for kvmv_init or bring back a pipeline someone asked to release.
-func TestWithLiveRefusesWhileStoppedAndDoesNotRebuild(t *testing.T) {
+// After the stop, no call may reach libkvm: kvmv_deinit has destroyed the mutex
+// each of them would take. The refusal has to be reported, because the frame
+// reads turn it into IMG_NOT_EXIST for the streamers.
+func TestACallAfterTheStopIsRefused(t *testing.T) {
 	g := newCaptureGate()
 	g.stop(func() {})
 
 	ran := false
 	if g.withLive(func() { ran = true }) {
-		t.Fatal("withLive ran while capture was stopped")
+		t.Fatal("withLive reported that it ran after the stop")
 	}
 	if ran {
-		t.Fatal("withLive called the function while capture was stopped")
+		t.Fatal("withLive called the function after the stop")
 	}
 
-	// The refusal must not have quietly resumed anything: a read arriving now
-	// still has to do the rebuild itself.
-	resumed := false
-	g.withRead(func() { resumed = true }, func() {})
-	if !resumed {
-		t.Fatal("withLive resumed the pipeline behind the caller's back")
+	// The refusal is permanent. Nothing brings the pipeline back, so a second
+	// call must not find it live again.
+	if g.withLive(func() {}) {
+		t.Fatal("withLive ran on a second attempt after the stop")
 	}
 }
 
-// The resume must happen once even if several reads arrive together, because
-// kvmv_init recreates the mutex and restarts both libkvm threads.
-func TestConcurrentReadsResumeOnlyOnce(t *testing.T) {
-	g := newCaptureGate()
-	g.stop(func() {})
-
-	var mu sync.Mutex
-	resumes := 0
-
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			g.withRead(
-				func() { mu.Lock(); resumes++; mu.Unlock() },
-				func() {},
-			)
-		}()
-	}
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if resumes != 1 {
-		t.Fatalf("resume ran %d times, want 1", resumes)
-	}
-}
-
-// The stop has to be idempotent. Close runs it, and a second call must not
+// The stop has to be idempotent. dispose runs it, and a second call must not
 // reach kvmv_deinit again: that would destroy an already destroyed mutex.
 func TestStopOnlyActsOnce(t *testing.T) {
 	g := newCaptureGate()
@@ -118,14 +58,14 @@ func TestStopOnlyActsOnce(t *testing.T) {
 	}
 }
 
-// A stop must wait for readers that are already inside the boundary. If it does
+// A stop must wait for calls that are already inside the boundary. If it does
 // not, kvmv_deinit runs while kvmv_read_img holds vi_mutex, which is the crash
 // this whole change exists to prevent.
-func TestStopWaitsForAReadAlreadyInFlight(t *testing.T) {
+func TestStopWaitsForACallAlreadyInFlight(t *testing.T) {
 	g := newCaptureGate()
 
-	readEntered := make(chan struct{})
-	releaseRead := make(chan struct{})
+	callEntered := make(chan struct{})
+	releaseCall := make(chan struct{})
 	var order []string
 	var mu sync.Mutex
 	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
@@ -134,14 +74,14 @@ func TestStopWaitsForAReadAlreadyInFlight(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		g.withRead(func() {}, func() {
-			close(readEntered)
-			<-releaseRead
-			note("read finished")
+		g.withLive(func() {
+			close(callEntered)
+			<-releaseCall
+			note("call finished")
 		})
 	}()
 
-	<-readEntered
+	<-callEntered
 
 	wg.Add(1)
 	go func() {
@@ -150,36 +90,36 @@ func TestStopWaitsForAReadAlreadyInFlight(t *testing.T) {
 	}()
 
 	// Give the stop a chance to run too early, which is the failure being
-	// tested for. It must still be blocked when the read is released.
+	// tested for. It must still be blocked when the call is released.
 	time.Sleep(50 * time.Millisecond)
-	close(releaseRead)
+	close(releaseCall)
 	wg.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(order) != 2 || order[0] != "read finished" || order[1] != "deinit ran" {
-		t.Fatalf("order was %v, want [read finished, deinit ran]", order)
+	if len(order) != 2 || order[0] != "call finished" || order[1] != "deinit ran" {
+		t.Fatalf("order was %v, want [call finished, deinit ran]", order)
 	}
 }
 
-// Reads are shared, so two streamers pulling frames must not serialise against
-// each other. Only a stop is exclusive.
-func TestReadsDoNotBlockEachOther(t *testing.T) {
+// The calls are shared, so two streamers pulling frames must not serialise
+// against each other. Only the stop is exclusive.
+func TestCallsDoNotBlockEachOther(t *testing.T) {
 	g := newCaptureGate()
 
 	first := make(chan struct{})
 	second := make(chan struct{})
 
-	go g.withRead(func() {}, func() { close(first); <-second })
+	go g.withLive(func() { close(first); <-second })
 	<-first
 
 	done := make(chan struct{})
-	go func() { g.withRead(func() {}, func() {}); close(done) }()
+	go func() { g.withLive(func() {}); close(done) }()
 
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("a second read blocked behind the first")
+		t.Fatal("a second call blocked behind the first")
 	}
 	close(second)
 }

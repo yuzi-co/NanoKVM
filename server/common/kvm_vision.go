@@ -35,18 +35,9 @@ var (
 	h264Reads  captureReadLog
 )
 
-// resumeCapture rebuilds the pipeline. kvmv_init is the counterpart of
-// kvmv_deinit: it recreates vi_mutex, reopens the camera and restarts libkvm's
-// two threads. The "auto init" the header claims for kvmv_read_img is only the
-// first-time path and does not undo a deinit.
-func resumeCapture() {
-	C.kvmv_init(C.uint8_t(0))
-	log.Debugf("capture pipeline rebuilt")
-}
-
-// KvmVision carries no state. The lifecycle lives in captureLifecycle, which is
-// a gate rather than a closed flag on purpose: an idle stop is not terminal, and
-// a flag that only ever goes one way would leave every later read refused.
+// KvmVision carries no state. The lifecycle lives in captureLifecycle, which
+// holds the read lock across each call rather than exposing a flag to test
+// beforehand - see capture_gate.go for why a flag would not close the race.
 type KvmVision struct{}
 
 func GetKvmVision() *KvmVision {
@@ -67,11 +58,11 @@ func (k *KvmVision) ReadMjpeg(width uint16, height uint16, quality uint16) (data
 		dataSize C.uint32_t
 	)
 
-	// If an idle stop released the pipeline, rebuild it before reading rather
-	// than refusing: whoever is reading is a viewer. IMG_NOT_EXIST stays as the
-	// answer if the rebuild itself did not take, which is what the streamers
-	// already treat as "no frame this time".
-	if !captureLifecycle.withRead(resumeCapture, func() {
+	// A read after the teardown answers IMG_NOT_EXIST rather than reaching
+	// kvmv_read_img with the mutex already destroyed. The streamers treat that
+	// as "no frame this time", which is what they do on a live board whenever
+	// libkvm has nothing ready.
+	if !captureLifecycle.withLive(func() {
 		result = int(C.kvmv_read_img(
 			C.uint16_t(width),
 			C.uint16_t(height),
@@ -101,11 +92,11 @@ func (k *KvmVision) ReadH264(width uint16, height uint16, bitRate uint16) (data 
 		dataSize C.uint32_t
 	)
 
-	// If an idle stop released the pipeline, rebuild it before reading rather
-	// than refusing: whoever is reading is a viewer. IMG_NOT_EXIST stays as the
-	// answer if the rebuild itself did not take, which is what the streamers
-	// already treat as "no frame this time".
-	if !captureLifecycle.withRead(resumeCapture, func() {
+	// A read after the teardown answers IMG_NOT_EXIST rather than reaching
+	// kvmv_read_img with the mutex already destroyed. The streamers treat that
+	// as "no frame this time", which is what they do on a live board whenever
+	// libkvm has nothing ready.
+	if !captureLifecycle.withLive(func() {
 		result = int(C.kvmv_read_img(
 			C.uint16_t(width),
 			C.uint16_t(height),
@@ -184,8 +175,7 @@ func (k *KvmVision) Close() {
 // timeout, and the 2026-08-01 rebase dropped that file - so the three methods
 // survived their consumer by months with nothing calling them.
 //
-// The gate itself stays: Close goes through it, and withRead rebuilds the
-// pipeline for a reader that arrives after a stop. Restoring the idle timeout
-// means restoring hdmi_idle.go from backup/pre-rebase-20260801 and adding these
-// three back on top of captureLifecycle.stop / .resume / .isLive, which are
-// still there.
+// The gate itself stays, and it is what keeps a read from reaching a destroyed
+// vi_mutex while Close is running. What it no longer carries is a way back:
+// see the note at the end of capture_gate.go for why nothing on a device can
+// stop capture without also ending the process.
